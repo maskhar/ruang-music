@@ -1,4 +1,4 @@
-export type Status = 'queued' | 'starting' | 'playing' | 'completed' | 'skipped' | 'cancelled' | 'failed';
+export type Status = 'queued' | 'starting' | 'playing' | 'completed' | 'skipped' | 'cancelled' | 'failed' | 'interrupted';
 export interface Track { uri: string; title: string; artist: string; album: string; image: string; durationMs: number; url: string; }
 export interface SongRequest extends Track { id: string; requester: string; source: 'web' | 'whatsapp'; senderId: string; messageId: string; groupId: string; status: Status; createdAt: number; startedAt: number | null; positionMs: number; error: string; }
 export interface Telemetry { uri: string; paused: boolean; positionMs: number; durationMs: number; }

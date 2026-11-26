@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { Store } from './database.ts';
 import { Spotify } from './spotify.ts';
-import { AppError, type Playback, type SongRequest, type Telemetry, type Track } from './types.ts';
+import { AppError, type Playback, type SongRequest, type Telemetry, type Track, type SpotifyPlayback } from './types.ts';
 export interface PlayerLease { connectionId: string; deviceId: string; updatedAt: number; }
 export class Queue extends EventEmitter {
   store: Store; spotify: Pick<Spotify, 'api' | 'connected'>; lease: PlayerLease | null = null;
   playback: Playback = { connected: false, deviceName: 'Belum ada player', paused: true, positionMs: 0, durationMs: 0, updatedAt: 0, volume: 70, error: '', needsGesture: false };
   serial: Promise<unknown> = Promise.resolve(); armed = false; startedAt = 0; lastState: Telemetry | null = null;
+  private missingPlayback: { requestId: string; firstAt: number; lastAt: number } | null = null;
   constructor(store: Store, spotify: Pick<Spotify, 'api' | 'connected'>) { super(); this.store = store; this.spotify = spotify; }
   run<T>(fn: () => Promise<T>): Promise<T> { const promise = this.serial.then(fn); this.serial = promise.catch(() => {}); return promise; }
   changed() { this.emit('change'); }
@@ -42,6 +43,26 @@ export class Queue extends EventEmitter {
   async next() { return this.run(async () => { const device = this.device(); const current = this.current(); if (!current && !this.store.list('queued', 1).length) { await this.spotify.api('/me/player/next?device_id=' + device, 'POST'); return; } await this.spotify.api('/me/player/pause?device_id=' + device, 'PUT'); if (current) { current.status = 'skipped'; this.store.save(current); } this.store.set('activeRequest', null); this.armed = false; await this.startNext(); }); }
   clear() { return this.run(async () => { const count = this.store.cancelQueued(); this.changed(); return count; }); }
   remove(id: string) { return this.run(async () => { const request = this.store.request(id); if (!request || request.status !== 'queued') throw new AppError('Request sudah diputar atau tidak ditemukan.', 409); request.status = 'cancelled'; this.store.save(request); this.changed(); }); }
+  reconcile(observation: SpotifyPlayback) {
+    return this.run(async () => {
+      const current = this.current();
+      // A disconnected SDK is not proof of completion. Require repeated,
+      // successful Spotify reads and leave untouched requests available to play.
+      if (!current || this.lease || observation.syncError || !observation.observedAt || observation.current?.uri === current.uri) { this.missingPlayback = null; return; }
+      const observedAt = observation.observedAt;
+      if (observedAt - Math.max(this.startedAt, current.startedAt || current.createdAt) < 30000) { this.missingPlayback = null; return; }
+      if (this.missingPlayback?.requestId !== current.id) { this.missingPlayback = { requestId: current.id, firstAt: observedAt, lastAt: observedAt }; return; }
+      if (observedAt <= this.missingPlayback.lastAt) return;
+      this.missingPlayback.lastAt = observedAt;
+      if (observedAt - this.missingPlayback.firstAt < 15000) return;
+      current.status = 'interrupted';
+      current.error = 'Pemutaran tidak lagi terdeteksi di Spotify. Request dipindahkan ke riwayat.';
+      this.store.save(current); this.store.set('activeRequest', null);
+      this.missingPlayback = null; this.armed = false; this.lastState = null;
+      this.playback = { ...this.playback, paused: true, positionMs: 0, durationMs: 0, updatedAt: Date.now() };
+      this.changed();
+    });
+  }
   async telemetry(connectionId: string, state: Telemetry) {
     return this.run(async () => { if (this.lease?.connectionId !== connectionId) return; this.lease.updatedAt = Date.now();
       const current = this.current(), previous = this.lastState;

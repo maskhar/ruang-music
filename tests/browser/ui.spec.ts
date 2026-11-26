@@ -30,3 +30,10 @@ test('snapshot Spotify mengisi metadata dan antrean lalu berubah realtime tanpa 
   await expect(page.locator('.count-pill')).toHaveText('0');
   await expect(page.locator('.live-status')).toContainText('Dijeda');
 });
+
+test('player idle tidak menampilkan request lama sebagai lagu aktif atau antrean berjalan',async({page},info)=>{
+ const old={uri:'spotify:track:old',title:'Lagu lama terhenti',artist:'Artis',album:'Album',image:'',durationMs:200000,url:'https://open.spotify.com/track/old',id:'old',requester:'Operator',source:'web',status:'playing',createdAt:1,startedAt:2,positionMs:0,error:''};
+ const snapshot={current:old,queue:[{...old,id:'waiting',title:'Request tersimpan Duka',status:'queued'}],history:[],playback:{connected:false,paused:true,positionMs:0,durationMs:200000,updatedAt:Date.now(),volume:70,error:'',needsGesture:false},spotifyPlayback:{current:null,queue:[],observedAt:Date.now(),paused:true,positionMs:0,durationMs:0,deviceId:'',deviceName:'',volume:70,syncError:'',filteredCount:0},notificationsFailed:0,spotifyConnected:true,spotifyConfigured:true,whatsappConfigured:true};
+ await page.route('**/api/session',r=>r.fulfill({json:{authenticated:true}}));await page.route('**/api/state',r=>r.fulfill({json:snapshot}));await page.routeWebSocket('**/ws',ws=>{ws.send(JSON.stringify({type:'hello',connectionId:'test'}));ws.send(JSON.stringify({type:'snapshot',data:snapshot}));});await page.goto('/');
+ await expect(page.getByRole('heading',{name:'Tidak ada lagu diputar.',exact:true})).toBeVisible();await expect(page.getByText('Lagu lama terhenti',{exact:true})).toHaveCount(0);await expect(page.locator('.queue-title .count-pill')).toHaveText('0');await expect(page.locator('.queue-row')).toHaveCount(0);await expect(page.getByRole('region',{name:'Request tersimpan'})).toBeVisible();await expect(page.getByRole('link',{name:'Request tersimpan Duka'})).toBeVisible();await expect(page.locator('.mini-current strong')).toHaveText('Belum ada lagu diputar');await expect(page.locator('.time-labels')).toHaveText('0:000:00');await page.screenshot({path:`test-results/idle-fixed-${info.project.name}.png`,fullPage:true});
+});
