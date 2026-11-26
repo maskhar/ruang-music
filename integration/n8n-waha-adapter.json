@@ -15,7 +15,7 @@
     },
     {
       "parameters": {
-        "jsCode": "const event = $json.body || $json;\nconst p = event.payload || {};\nif (event.session !== 'carubra' || !['message','message.any'].includes(event.event) || p.fromMe || p.from !== '120363430180897172@g.us' || !p.participant || !/^\\/\\S+/.test(p.body || '')) return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:p.body,requester:(p._data?.notifyName || p.pushName || 'Anggota WhatsApp').slice(0,60)}}];"
+        "jsCode": "const event = $json.body || $json;\nconst p = event.payload || {};\nif (event.session !== 'carubra' || !['message','message.any'].includes(event.event) || p.fromMe || !['120363430180897172@g.us','120363412435389448@g.us'].includes(p.from) || !p.participant || !/^\\/\\S+/.test(p.body || '')) return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:p.body,requester:(p._data?.notifyName || p.pushName || 'Anggota WhatsApp').slice(0,60)}}];"
       },
       "type": "n8n-nodes-base.code",
       "typeVersion": 2,

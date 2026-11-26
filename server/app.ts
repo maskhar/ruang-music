@@ -54,7 +54,7 @@ export function createApp(config: Config, provided?: Store) {
   app.post('/api/integrations/whatsapp', rateLimit({ windowMs: 60000, limit: 40, legacyHeaders: false }), async (req, res) => {
     if (!config.integrationToken || !equal(req.get('authorization') || '', 'Bearer ' + config.integrationToken)) throw new AppError('Integration token tidak valid.', 401);
     const body = z.object({ groupId: z.string(), senderId: z.string().regex(/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/), messageId: z.string().min(1).max(250), text: z.string().trim().min(1).max(1000), requester: z.string().trim().max(60).default('Anggota WhatsApp') }).parse(req.body);
-    if (body.groupId !== config.groupId) throw new AppError('Grup tidak diizinkan.', 403);
+    if (!config.groupIds.includes(body.groupId)) throw new AppError('Grup tidak diizinkan.', 403);
     const previousIntegration = integrationSerial; let finishIntegration!: () => void; integrationSerial = new Promise<void>(resolve => { finishIntegration = resolve; }); await previousIntegration;
     try {
     const prior = store.db.prepare('SELECT reply FROM receipts WHERE id=?').get(body.messageId) as { reply: string } | undefined; if (prior) { res.json({ reply: prior.reply, duplicate: true }); return; }

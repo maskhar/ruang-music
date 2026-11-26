@@ -35,7 +35,7 @@ Spotify Premium diperlukan; paket mobile-only tertentu tidak mendukung SDK. Duku
 
 ## Integrasi WhatsApp melalui n8n
 
-Grup yang diizinkan: `120363430180897172@g.us`. Session: `carubra`. Credential WAHA: `WAHA account`.
+Grup yang diizinkan: `120363430180897172@g.us` dan `120363412435389448@g.us`. Konfigurasi memakai `WHATSAPP_GROUP_IDS` dipisahkan koma; `WHATSAPP_GROUP_ID` lama masih didukung sebagai fallback. Semua grup berbagi player/antrean Spotify yang sama. Balasan dan notifikasi dikirim hanya ke grup asal request. Session: `carubra`. Credential WAHA: `WAHA account`.
 
 Adapter belum aktif. Jangan jalankan adapter dan workflow lama untuk event yang sama. Urutan cutover:
 
