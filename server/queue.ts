@@ -77,6 +77,7 @@ export class Queue extends EventEmitter {
   remove(id: string) { return this.run(async () => { const request = this.store.request(id); if (!request || request.status !== 'queued') throw new AppError('Request sudah diputar atau tidak ditemukan.', 409); request.status = 'cancelled'; this.store.save(request); await this.syncContext(); this.changed(); }); }
   reconcile(observation: SpotifyPlayback) {
     return this.run(async () => {
+      if (!observation.syncError && observation.observedAt && this.lease?.deviceId === observation.deviceId) { this.playback.volume = observation.volume; this.playback.volumeUpdatedAt = observation.observedAt; }
       const current = this.current();
       if (current && !this.lease && !observation.syncError && observation.observedAt) {
         const context = this.store.get<{ requestIds: string[]; deviceId: string }>('spotifyPlaybackContext');

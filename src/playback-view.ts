@@ -17,5 +17,6 @@ export function playbackView(state: Snapshot | null) {
   const useNativeProgress = current && native?.current?.uri === current.uri && (!connected || !!externalCurrent);
   const playback = state?.playback && useNativeProgress && native ? { ...state.playback, paused: native.paused, positionMs: native.positionMs, durationMs: native.durationMs, updatedAt: native.observedAt } : state?.playback;
   const hasPlayback = !!current && (connected || !!native?.deviceId);
-  return { native, appQueue, externalCurrent, current, nativeQueue, waitingRequests, queue, playback, hasPlayback };
+  const volume = native?.deviceId && native.observedAt && !native.syncError && native.observedAt >= (state?.playback.volumeUpdatedAt || 0) ? native.volume : state?.playback.volume ?? 70;
+  return { native, appQueue, externalCurrent, current, nativeQueue, waitingRequests, queue, playback, hasPlayback, volume };
 }
