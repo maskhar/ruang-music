@@ -73,6 +73,7 @@ export class Queue extends EventEmitter {
   }); }
   async pause() { return this.run(async () => { await this.spotify.api('/me/player/pause?device_id=' + this.device(), 'PUT'); this.playback.paused = true; this.changed(); }); }
   async next() { return this.run(async () => { const device = this.device(); const current = this.current(); if (!current && !this.store.list('queued', 1).length) { await this.spotify.api('/me/player/next?device_id=' + device, 'POST'); return; } await this.spotify.api('/me/player/pause?device_id=' + device, 'PUT'); if (current) { current.status = 'skipped'; this.store.save(current); } this.store.set('activeRequest', null); this.armed = false; await this.startNext(); }); }
+  contextSyncPending() { const current = this.current(); const saved = this.store.get<{ requestIds: string[] }>('spotifyPlaybackContext'); return !!current && !!saved?.requestIds.includes(current.id) && this.context(current).key !== saved.requestIds.slice(saved.requestIds.indexOf(current.id)).join(':'); }
   clear() { return this.run(async () => { const count = this.store.cancelQueued(); await this.syncContext(); this.changed(); return count; }); }
   remove(id: string) { return this.run(async () => { const request = this.store.request(id); if (!request || request.status !== 'queued') throw new AppError('Request sudah diputar atau tidak ditemukan.', 409); request.status = 'cancelled'; this.store.save(request); await this.syncContext(); this.changed(); }); }
   reconcile(observation: SpotifyPlayback) {

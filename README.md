@@ -116,3 +116,7 @@ Script patch: `scripts/n8n/playlist-links.cjs`. Pengujian integrasi terisolasi: 
 Metadata playlist dapat ditolak meski tautan terbuka di aplikasi Spotify. `/playlist URL` kini tetap mencoba playback memakai `context_uri` tepat dari URL jika pembacaan metadata mendapat 403/404. Nama generic digunakan jika metadata tidak tersedia. `/play URL` saat idle memakai jalur langsung yang sama; saat lagu berjalan tetap membutuhkan daftar track untuk antrean dan tidak otomatis mengganti playback. HTTP 401/429/5xx tidak menjalankan fallback mutasi. Jika endpoint playback sendiri menolak playlist, kegagalan dilaporkan dan tidak dicatat sebagai sukses. Pemutaran nyata playlist personal tetap bergantung akun, playlist, dan perangkat Spotify.
 
 Patch: `scripts/n8n/playlist-metadata-fallback.cjs`. Delapan skenario workflow diuji terisolasi dengan mutation playback/WhatsApp tiruan, termasuk metadata 404/403, playback 404, dan rate limit.
+
+## Tombol pengelolaan antrean
+
+Saat daftar hanya berisi antrean native Spotify, dashboard menampilkan tombol **Kelola antrean Spotify** yang membuka penjelasan batas penghapusan dan tautan ke antrean Spotify. Tombol clear request tidak lagi ditampilkan nonaktif seolah dapat menghapus daftar native. Bila terdapat request aplikasi, penghapusan tetap meminta konfirmasi dan hanya membatalkan request tersebut. Jika konteks pemutaran aplikasi sedang dijeda sehingga belum dapat disinkronkan, hasil penghapusan menyebut perubahan diterapkan saat Putar dilanjutkan; pemutaran tidak dipaksa menyala.
