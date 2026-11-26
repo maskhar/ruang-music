@@ -102,3 +102,11 @@ Invoke-RestMethod http://127.0.0.1:3210/healthz
 Script backup memakai SQLite VACUUM INTO agar snapshot konsisten meski WAL aktif, lalu menyalin snapshot ke folder `backups` pada host. Backup satu komputer bukan pemulihan bila komputer rusak; salin ke penyimpanan lain. Simpan image lama sampai versi pengganti sehat. Untuk rollback gunakan image versi sebelumnya dengan volume yang sama; hentikan player lebih dulu sebelum mengganti database dari backup. Pemasangan awal ini tidak memiliki database lama untuk diimpor.
 
 Git repo lokal disiapkan; remote belum ditentukan sehingga belum ada push. `.env`, data, backup, dan hasil test tidak masuk Git.
+
+## URL playlist pada workflow WhatsApp aktif
+
+Workflow utama mengenali URL/URI playlist secara langsung, termasuk query `si` dan prefix `intl-id`, tanpa pencarian AI. `/play URL_PLAYLIST` memutar konteks playlist ketika idle; ketika lagu aktif, daftar track dibaca dan ditambahkan sesuai urutan (maksimal 200 item, lagu lokal/tidak tersedia dilewati). Jika Spotify menolak pembacaan daftar track dengan HTTP 403, tidak ada mutation antrean dan balasan menjelaskan batas akses. Playlist publik milik orang lain pun dapat terkena pembatasan API.
+
+Gunakan `/playlist URL_PLAYLIST` untuk memutar konteks playlist langsung tanpa membaca daftar track. Command ini menggantikan playback aktif; bukan menambahkan playlist ke antrean. Keberhasilan tetap bergantung izin playback Spotify dan perangkat aktif. `/help` sudah memuat command ini. Adapter staged aplikasi tidak menangani `/playlist` langsung; fitur ini berada pada workflow WhatsApp aktif `mMKGZXtIS2uvso8W`.
+
+Script patch: `scripts/n8n/playlist-links.cjs`. Pengujian integrasi terisolasi: `scripts/n8n/test-playlist-links.cjs`, seluruh mutation Spotify dan pesan WAHA dimock; workflow sementara dibersihkan. Backup sebelum perubahan ada di `backups/playlist-20261126`.

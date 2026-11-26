@@ -49,7 +49,9 @@ export class Spotify {
     const container = await this.api(`/${ref.type}s/${ref.id}`);
     const tracks: Track[] = []; let path: string | null = `/${ref.type}s/${ref.id}/${ref.type === 'playlist' ? 'items' : 'tracks'}?limit=50`;
     while (path && tracks.length < 200) {
-      const page: any = await this.api(path);
+      let page: any;
+      try { page = await this.api(path); }
+      catch (error) { if (ref.type === 'playlist' && error instanceof AppError && error.status === 403) throw new AppError('Metadata playlist tersedia, tetapi Spotify menolak akses daftar lagunya (HTTP 403). Playlist ini tidak dapat ditambahkan sebagai antrean track. Untuk memutar langsung, gunakan /playlist ' + `https://open.spotify.com/playlist/${ref.id}` + ' di grup WhatsApp; command tersebut menggantikan playback aktif.', 403); throw error; }
       for (const row of page.items || []) { const t = ref.type === 'playlist' ? row.item || row.track : row; if (t?.uri?.startsWith('spotify:track:') && !t.is_local && t.is_playable !== false) tracks.push(toTrack(t, ref.type === 'album' ? container : undefined)); }
       if (page.next) { const url = new URL(page.next); if (url.origin !== 'https://api.spotify.com' || !url.pathname.startsWith('/v1/')) throw new AppError('Pagination Spotify tidak valid.'); path = url.pathname.slice(3) + url.search; } else path = null;
     }
