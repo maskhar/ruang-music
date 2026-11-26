@@ -8,7 +8,7 @@ Source: `I:\website-devops\spotify-player`. Domain: `https://spotify.carubra.com
 
 Docker service `spotify-player` tersedia pada `127.0.0.1:3210`, tergabung `carubra-network`. Client ID dari aplikasi Spotify yang dipakai n8n dan kredensial WAHA sudah diisi secara lokal. `.env` menyimpan password operator, kunci enkripsi, dan integration token; file ini diabaikan Git. Jangan membagikan file tersebut.
 
-Domain masih perlu diarahkan lewat Cloudflare Tunnel. OAuth Spotify dan suara nyata belum diuji karena memerlukan login pemilik akun. Workflow n8n lama belum diubah. Adapter tersedia pada `integration/n8n-waha-adapter.json`.
+Domain dan login Spotify dapat dipakai sesuai konfigurasi aktif. Workflow n8n lama masih mengisi antrean Spotify; dashboard kini menyinkronkan playback dan antrean tersebut tanpa cutover. Adapter antrean aplikasi tetap tersedia pada `integration/n8n-waha-adapter.json`.
 
 ## Mengaktifkan domain dan Spotify
 
@@ -24,7 +24,9 @@ Spotify Premium diperlukan; paket mobile-only tertentu tidak mendukung SDK. Duku
 
 - Request judul/artis, URL atau URI Spotify track, album, playlist. Pencarian teks mengambil track pertama berdasarkan relevansi Spotify; tidak mengklaim lagu/playlist paling populer. Pilihan hasil pencarian tersedia di web.
 - Maksimal 200 track per album/playlist; 500 request menunggu. Album mengikuti urutan Spotify. Lagu sama boleh diminta lebih dari sekali dan disimpan sebagai request terpisah.
+- Dashboard membaca lagu aktif beserta antrean Spotify setiap 5 detik selama operator terhubung, lalu mengirim snapshot lewat WebSocket. Nama, artis, cover, posisi, dan perubahan antrean ikut diperbarui tanpa reload. Request WhatsApp workflow lama terlihat sebagai **Antrean Spotify**; identitas peminta tidak ditebak.
 - Antrean aplikasi tersimpan dalam SQLite, terpisah dari antrean bawaan Spotify. Lagu terakhir dibersihkan setelah SDK melaporkan akhir; Spotify continuation dihentikan. Lagu dari playlist/autoplay Spotify tidak dimasukkan sebagai request palsu.
+- Antrean native dan request aplikasi diberi sumber berbeda. Hapus/kosongkan hanya berlaku untuk request aplikasi, karena Spotify Web API tidak menyediakan hapus/clear antrean native. Ekor seragam minimal 3 salinan lagu aktif atau lagu yang telah dikenali sebagai duplikat usang disaring secara heuristik; daftar pengenal ini disimpan hingga 24 jam dan bertahan setelah restart. Spotify tidak menyediakan ID kejadian antrean, sehingga pengulangan native tidak dapat dibedakan sempurna; request berulang dalam antrean aplikasi tetap utuh.
 - Jeda, lanjut, berikutnya, volume, hapus satu request, kosongkan seluruh request menunggu dengan konfirmasi. Lagu aktif tetap berjalan saat antrean dikosongkan.
 - Riwayat 20 request terakhir. Browser terputus tidak menghapus antrean; aktifkan browser lalu lanjutkan. Posisi terakhir disimpan, tetapi kelanjutan audio tidak dijamin tanpa browser aktif.
 - Notifikasi WAHA di grup, mention pengirim dan balas pesan asal, setelah SDK melaporkan URI request sedang diputar. Ini konfirmasi state playback, bukan pengukuran speaker. Setiap request memiliki satu outbox notifikasi. Pengiriman ambigu tidak dicoba ulang otomatis agar tidak menggandakan pesan.
@@ -81,7 +83,7 @@ docker compose ps
 
 Untuk pengembangan lokal, gunakan `.env` terpisah dengan `APP_ORIGIN=http://127.0.0.1:5173`, jalankan `npm run dev`, buka port 5173. Callback OAuth harus didaftarkan sesuai origin; HTTPS domain lebih cocok untuk Android. Jangan mengganti origin service produksi hanya untuk pengujian lokal. Browser tests memakai server port 3211 dan database memori, tanpa akun atau pesan WAHA nyata.
 
-Kode: `server/queue.ts` mesin antrean, `server/database.ts` penyimpanan, `server/spotify.ts` OAuth/API, `server/notifications.ts` outbox WAHA, `server/app.ts` API/WebSocket, `src/player.ts` SDK browser, `src/App.tsx` dashboard.
+Kode: `server/spotify-observer.ts` sinkronisasi antrean/playback native, `server/queue.ts` mesin antrean, `server/database.ts` penyimpanan, `server/spotify.ts` OAuth/API, `server/notifications.ts` outbox WAHA, `server/app.ts` API/WebSocket, `src/player.ts` SDK browser, `src/App.tsx` dashboard.
 
 ## Backup dan pembaruan
 

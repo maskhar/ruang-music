@@ -33,13 +33,13 @@ export class Queue extends EventEmitter {
     this.changed();
   }
   async resume() { return this.run(async () => { const device = this.device(); const current = this.current(); this.playback.error = ''; this.playback.needsGesture = false;
-    if (!current) { await this.startNext(); return; }
+    if (!current) { if (this.store.list('queued', 1).length) await this.startNext(); else await this.spotify.api('/me/player/play?device_id=' + device, 'PUT', {}); return; }
     if (this.lastState?.uri === current.uri && this.armed) await this.spotify.api('/me/player/play?device_id=' + device, 'PUT', {});
     else { this.startedAt = Date.now(); this.armed = false; current.status = 'starting'; this.store.save(current); await this.spotify.api('/me/player/play?device_id=' + device, 'PUT', { uris: [current.uri], position_ms: Math.min(current.positionMs, Math.max(0, current.durationMs - 1000)) }); }
     this.changed();
   }); }
   async pause() { return this.run(async () => { await this.spotify.api('/me/player/pause?device_id=' + this.device(), 'PUT'); this.playback.paused = true; this.changed(); }); }
-  async next() { return this.run(async () => { const device = this.device(); await this.spotify.api('/me/player/pause?device_id=' + device, 'PUT'); const current = this.current(); if (current) { current.status = 'skipped'; this.store.save(current); } this.store.set('activeRequest', null); this.armed = false; await this.startNext(); }); }
+  async next() { return this.run(async () => { const device = this.device(); const current = this.current(); if (!current && !this.store.list('queued', 1).length) { await this.spotify.api('/me/player/next?device_id=' + device, 'POST'); return; } await this.spotify.api('/me/player/pause?device_id=' + device, 'PUT'); if (current) { current.status = 'skipped'; this.store.save(current); } this.store.set('activeRequest', null); this.armed = false; await this.startNext(); }); }
   clear() { return this.run(async () => { const count = this.store.cancelQueued(); this.changed(); return count; }); }
   remove(id: string) { return this.run(async () => { const request = this.store.request(id); if (!request || request.status !== 'queued') throw new AppError('Request sudah diputar atau tidak ditemukan.', 409); request.status = 'cancelled'; this.store.save(request); this.changed(); }); }
   async telemetry(connectionId: string, state: Telemetry) {
