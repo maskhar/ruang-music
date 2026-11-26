@@ -110,3 +110,9 @@ Workflow utama mengenali URL/URI playlist secara langsung, termasuk query `si` d
 Gunakan `/playlist URL_PLAYLIST` untuk memutar konteks playlist langsung tanpa membaca daftar track. Command ini menggantikan playback aktif; bukan menambahkan playlist ke antrean. Keberhasilan tetap bergantung izin playback Spotify dan perangkat aktif. `/help` sudah memuat command ini. Adapter staged aplikasi tidak menangani `/playlist` langsung; fitur ini berada pada workflow WhatsApp aktif `mMKGZXtIS2uvso8W`.
 
 Script patch: `scripts/n8n/playlist-links.cjs`. Pengujian integrasi terisolasi: `scripts/n8n/test-playlist-links.cjs`, seluruh mutation Spotify dan pesan WAHA dimock; workflow sementara dibersihkan. Backup sebelum perubahan ada di `backups/playlist-20261126`.
+
+### Playlist personal dengan metadata HTTP 403/404
+
+Metadata playlist dapat ditolak meski tautan terbuka di aplikasi Spotify. `/playlist URL` kini tetap mencoba playback memakai `context_uri` tepat dari URL jika pembacaan metadata mendapat 403/404. Nama generic digunakan jika metadata tidak tersedia. `/play URL` saat idle memakai jalur langsung yang sama; saat lagu berjalan tetap membutuhkan daftar track untuk antrean dan tidak otomatis mengganti playback. HTTP 401/429/5xx tidak menjalankan fallback mutasi. Jika endpoint playback sendiri menolak playlist, kegagalan dilaporkan dan tidak dicatat sebagai sukses. Pemutaran nyata playlist personal tetap bergantung akun, playlist, dan perangkat Spotify.
+
+Patch: `scripts/n8n/playlist-metadata-fallback.cjs`. Delapan skenario workflow diuji terisolasi dengan mutation playback/WhatsApp tiruan, termasuk metadata 404/403, playback 404, dan rate limit.
