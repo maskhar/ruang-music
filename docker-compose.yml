@@ -1,0 +1,30 @@
+name: spotify-player
+services:
+  player:
+    build: .
+    container_name: spotify-player
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      DATA_DIR: /app/data
+    ports:
+      - "127.0.0.1:3210:3210"
+    volumes:
+      - player-data:/app/data
+    networks:
+      - carubra-network
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+volumes:
+  player-data:
+networks:
+  carubra-network:
+    external: true

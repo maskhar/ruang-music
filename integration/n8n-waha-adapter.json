@@ -1,0 +1,118 @@
+{
+  "name": "Ruang Musik · WAHA adapter (staged)",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-waha.wahaTrigger",
+      "typeVersion": 202411,
+      "position": [
+        0,
+        0
+      ],
+      "id": "1fda0a02-bede-4989-9dfa-4df019a174e1",
+      "name": "WAHA Trigger",
+      "webhookId": "c1cf88e9-1e47-4139-9e67-bd8bd9363d6e"
+    },
+    {
+      "parameters": {
+        "jsCode": "const event = $json.body || $json;\nconst p = event.payload || {};\nif (event.session !== 'carubra' || !['message','message.any'].includes(event.event) || p.fromMe || p.from !== '120363430180897172@g.us' || !p.participant || !/^\\/\\S+/.test(p.body || '')) return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:p.body,requester:(p._data?.notifyName || p.pushName || 'Anggota WhatsApp').slice(0,60)}}];"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        240,
+        0
+      ],
+      "id": "880935af-c56b-4de5-9ccd-a1e304bd3484",
+      "name": "Validasi grup dan peminta"
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://spotify-player:3210/api/integrations/whatsapp",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        480,
+        0
+      ],
+      "id": "9fb1aea1-58cf-49f3-8ea8-573e7938ac77",
+      "name": "Request Ruang Musik"
+    },
+    {
+      "parameters": {
+        "resource": "Chatting",
+        "operation": "Send Text",
+        "session": "carubra",
+        "chatId": "={{ $('Validasi grup dan peminta').item.json.groupId }}",
+        "reply_to": "={{ $('Validasi grup dan peminta').item.json.messageId }}",
+        "text": "={{ $json.reply }}",
+        "requestOptions": {}
+      },
+      "type": "@devlikeapro/n8n-nodes-waha.WAHA",
+      "typeVersion": 202502,
+      "position": [
+        720,
+        0
+      ],
+      "id": "05a9a9ee-ac42-475c-9216-708a85c2aad3",
+      "name": "Reply WhatsApp",
+      "credentials": {
+        "wahaApi": {
+          "id": "TmoxOMfuUUCgESYA",
+          "name": "WAHA account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "WAHA Trigger": {
+      "main": [
+        [
+          {
+            "node": "Validasi grup dan peminta",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Validasi grup dan peminta": {
+      "main": [
+        [
+          {
+            "node": "Request Ruang Musik",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Request Ruang Musik": {
+      "main": [
+        [
+          {
+            "node": "Reply WhatsApp",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "none",
+    "saveDataErrorExecution": "none"
+  },
+  "active": false
+}
