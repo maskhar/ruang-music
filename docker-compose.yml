@@ -37,4 +37,3 @@ volumes:
 networks:
   carubra-network:
     external: true
-
