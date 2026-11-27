@@ -102,3 +102,22 @@ Backup workflow sebelum perubahan tersedia di `backups/app-queue-cutover-2026112
 Rollback integrasi: pulihkan JSON workflow utama dari backup melalui API/import, aktifkan workflow utama dan monitor lama, lalu gunakan image sebelum app-queue. Jangan jalankan monitor lama dan outbox baru untuk request yang sama. Request yang sudah tersimpan di SQLite tetap dipertahankan. Riwayat/pending lama n8n tetap tersimpan dalam tabel lama dan tidak diimpor otomatis karena tidak dapat dipastikan masih valid.
 
 Remote Git belum ditentukan; commit lokal tersedia, belum bisa push.
+
+## Lingkungan pengembangan maskhar-dev
+
+Worktree pengembangan: `I:\website-devops\spotify-player-dev`, branch `maskhar-dev`.
+Produksi tetap pada `I:\website-devops\spotify-player`, branch `main`.
+
+Development memakai container/image `dev-spotify-player`, port `http://127.0.0.1:3211`, volume `dev-spotify-player_dev-player-data`, dan jaringan Compose tersendiri. Database dimulai kosong; token Spotify, data request, dan konfigurasi WAHA produksi tidak disalin. Password operator awal sama dengan produksi agar operator dapat login; `.env`, kunci enkripsi, dan integration token development terpisah.
+
+Spotify Client ID dan WAHA dinonaktifkan melalui Compose. Jangan hubungkan akun Spotify produksi untuk pengujian karena satu akun Spotify berbagi playback antarperangkat meskipun database terpisah. Untuk pengujian audio, gunakan akun Premium serta Spotify Developer App pengujian dan daftarkan callback origin development. Untuk WAHA gunakan session dan grup pengujian terpisah sebelum mengaktifkan integrasi.
+
+Jalankan build/deploy development hanya dari worktree development:
+
+```powershell
+cd I:\website-devops\spotify-player-dev
+docker compose up -d --build
+docker compose ps
+```
+
+Deploy perintah ini tidak mengganti container/volume produksi. Jangan memakai volume produksi atau menjalankan `docker compose down -v`. Perubahan branch development baru masuk produksi melalui proses merge yang disengaja. Image ini tetap memakai build production untuk hasil uji yang konsisten; kode baru tersedia setelah build ulang.

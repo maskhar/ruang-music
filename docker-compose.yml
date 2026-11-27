@@ -1,19 +1,24 @@
-name: spotify-player
+name: dev-spotify-player
 services:
   player:
     build: .
-    container_name: spotify-player
+    image: dev-spotify-player:latest
+    container_name: dev-spotify-player
     restart: unless-stopped
     env_file: .env
     environment:
       NODE_ENV: production
+      PORT: 3210
+      APP_ORIGIN: http://127.0.0.1:3211
       DATA_DIR: /app/data
+      SPOTIFY_CLIENT_ID: ""
+      WAHA_URL: ""
+      WAHA_API_KEY: ""
+      WHATSAPP_GROUP_IDS: 0@g.us
     ports:
-      - "127.0.0.1:3210:3210"
+      - "127.0.0.1:3211:3210"
     volumes:
-      - player-data:/app/data
-    networks:
-      - carubra-network
+      - dev-player-data:/app/data
     security_opt:
       - no-new-privileges:true
     cap_drop:
@@ -24,7 +29,4 @@ services:
         max-size: "10m"
         max-file: "3"
 volumes:
-  player-data:
-networks:
-  carubra-network:
-    external: true
+  dev-player-data:
