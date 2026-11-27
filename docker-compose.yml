@@ -11,10 +11,6 @@ services:
       PORT: 3210
       APP_ORIGIN: https://dev-spotify.carubra.com
       DATA_DIR: /app/data
-      SPOTIFY_CLIENT_ID: ""
-      WAHA_URL: ""
-      WAHA_API_KEY: ""
-      WHATSAPP_GROUP_IDS: 0@g.us
     ports:
       - "127.0.0.1:3211:3210"
     volumes:

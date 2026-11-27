@@ -101,7 +101,7 @@ Backup workflow sebelum perubahan tersedia di `backups/app-queue-cutover-2026112
 
 Rollback integrasi: pulihkan JSON workflow utama dari backup melalui API/import, aktifkan workflow utama dan monitor lama, lalu gunakan image sebelum app-queue. Jangan jalankan monitor lama dan outbox baru untuk request yang sama. Request yang sudah tersimpan di SQLite tetap dipertahankan. Riwayat/pending lama n8n tetap tersimpan dalam tabel lama dan tidak diimpor otomatis karena tidak dapat dipastikan masih valid.
 
-Remote Git belum ditentukan; commit lokal tersedia, belum bisa push.
+Remote Git: `https://github.com/maskhar/ruang-music.git`.
 
 ## Lingkungan pengembangan maskhar-dev
 
@@ -110,7 +110,7 @@ Produksi tetap pada `I:\website-devops\spotify-player`, branch `main`.
 
 Development memakai container/image `dev-spotify-player`, port `http://127.0.0.1:3211`, volume `dev-spotify-player_dev-player-data`, dan jaringan Compose tersendiri. Database dimulai kosong; token Spotify, data request, dan konfigurasi WAHA produksi tidak disalin. Password operator awal sama dengan produksi agar operator dapat login; `.env`, kunci enkripsi, dan integration token development terpisah.
 
-Spotify Client ID dan WAHA dinonaktifkan melalui Compose. Jangan hubungkan akun Spotify produksi untuk pengujian karena satu akun Spotify berbagi playback antarperangkat meskipun database terpisah. Untuk pengujian audio, gunakan akun Premium serta Spotify Developer App pengujian dan daftarkan callback origin development. Untuk WAHA gunakan session dan grup pengujian terpisah sebelum mengaktifkan integrasi.
+Spotify Client ID dan WAHA dibaca dari `.env` development. Jangan hubungkan akun Spotify produksi untuk pengujian karena satu akun Spotify berbagi playback antarperangkat meskipun database terpisah. Untuk pengujian audio, gunakan akun Premium serta Spotify Developer App pengujian dan daftarkan callback origin development. Untuk WAHA gunakan session dan grup pengujian terpisah sebelum mengaktifkan integrasi.
 
 Jalankan build/deploy development hanya dari worktree development:
 
@@ -126,3 +126,9 @@ Domain development: `https://dev-spotify.carubra.com`.
 Spotify callback: `https://dev-spotify.carubra.com/auth/spotify/callback`.
 Tambahkan Published application route pada Cloudflare Tunnel carubra untuk hostname `dev-spotify.carubra.com` dengan service HTTP `http://dev-spotify-player:3210`.
 Container development terhubung ke `carubra-network` untuk ingress tunnel; volume/database tetap terpisah. Port localhost 3211 tetap tersedia untuk health check. Login/operator memakai domain HTTPS karena cookie Secure mengikuti APP_ORIGIN.
+
+### Integrasi development
+
+Compose membaca `SPOTIFY_CLIENT_ID`, `WHATSAPP_GROUP_IDS`, `WAHA_URL`, `WAHA_API_KEY`, dan `WAHA_SESSION` dari `.env` worktree development. File ini diabaikan Git. Setelah mengubah `.env`, jalankan `docker compose up -d --force-recreate` dari worktree development. Gunakan hanya grup pengujian; jangan masukkan grup produksi. Session WAHA harus tersedia dan WORKING sebelum workflow diaktifkan.
+
+Workflow n8n development: `xanTFAOSvArYVB9E` (Ruang Musik · DEVELOPMENT), aktif. Session WAHA `carubra` digunakan bersama dengan filter grup pengujian terpisah; webhook lama dipertahankan. Credential API development terpisah dari produksi. Registrasi webhook memulai ulang session WAHA; lakukan perubahan berikutnya pada waktu yang sesuai. Script provisioning `scripts/n8n/setup-development.cjs` hanya untuk pembuatan pertama, bukan dijalankan ulang pada workflow yang sudah tersedia.
