@@ -6,7 +6,7 @@ import { Store } from '../server/database.ts';
 import { loadConfig } from '../server/config.ts';
 import { AppError } from '../server/types.ts';
 
-test('/next menerima HTTP 200 kosong dari pause dan play tanpa kehilangan antrean', async () => {
+for (const responseBody of ['', 'OK', 'Accepted']) test(`/next menerima respons sukses ${JSON.stringify(responseBody)} tanpa kehilangan antrean`, async () => {
   const store = new Store(':memory:');
   const spotify = new Spotify(loadConfig({ADMIN_PASSWORD:'test-password-123456',ENCRYPTION_KEY:'a'.repeat(64)}), store);
   spotify.token = async () => 'mock-token';
@@ -14,7 +14,7 @@ test('/next menerima HTTP 200 kosong dari pause dan play tanpa kehilangan antrea
   const calls: {path:string; body:unknown}[] = [];
   globalThis.fetch = async (input, init) => {
     calls.push({path:String(input),body:init?.body ? JSON.parse(String(init.body)) : null});
-    return new Response('', {status:200});
+    return new Response(responseBody, {status:200});
   };
   try {
     const queue = new Queue(store, spotify);
@@ -29,6 +29,8 @@ test('/next menerima HTTP 200 kosong dari pause dan play tanpa kehilangan antrea
     assert.match(calls.at(-2)!.path,/\/pause\?/);
     assert.deepEqual(calls.at(-1)!.body,{uris:[tracks[1].uri]});
     assert.equal(queue.current()?.status,'starting');
+    globalThis.fetch = async () => new Response('Forbidden', {status:403});
+    await assert.rejects(()=>spotify.api('/me/player/pause?device_id=device','PUT'), error=>error instanceof AppError && error.status===403);
     globalThis.fetch = async () => new Response('{broken', {status:200});
     await assert.rejects(()=>spotify.api('/me/player'), error=>error instanceof AppError && error.status===502);
     globalThis.fetch = async () => Response.json({is_playing:true});

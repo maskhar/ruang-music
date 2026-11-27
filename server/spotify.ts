@@ -41,6 +41,9 @@ export class Spotify {
     if (!response.ok) { if (response.status === 429) { const error = new AppError('Batas request Spotify tercapai. Tunggu sebentar sebelum mencoba lagi.', 429); const retry = Number(response.headers.get('retry-after')); error.retryAfterMs = Number.isFinite(retry) && retry > 0 ? retry * 1000 : 30000; throw error; } if (response.status === 404) throw new AppError('Spotify tidak menemukan perangkat/lagu. Aktifkan player browser ini lalu coba lagi.', 409); if (response.status === 403) throw new AppError('Spotify menolak akses. Pastikan akun Premium dan diizinkan di Developer Dashboard.', 403); throw new AppError(`Spotify sedang tidak tersedia (HTTP ${response.status}). Command tidak diulang otomatis.`, 502); }
     if (response.status === 204) return null;
     const text = await response.text();
+    // Playback PUT endpoints return no data. Successful replies may be plain
+    // text; SDK telemetry, not this response body, confirms actual playback.
+    if (method === 'PUT' && /^\/me\/player(?:\/(?:play|pause|volume|seek|shuffle|repeat))?(?:\?|$)/.test(path)) return null;
     // Some playback commands return HTTP 200 with an empty body.
     if (!text.trim()) return null;
     try { return JSON.parse(text); }
