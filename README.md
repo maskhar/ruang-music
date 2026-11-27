@@ -129,18 +129,24 @@ Container development terhubung ke `carubra-network` untuk ingress tunnel; volum
 
 ### Integrasi development
 
-Compose membaca `SPOTIFY_CLIENT_ID`, `WHATSAPP_GROUP_IDS`, `WAHA_URL`, `WAHA_API_KEY`, dan `WAHA_SESSION` dari `.env` worktree development. File ini diabaikan Git. Setelah mengubah `.env`, jalankan `docker compose up -d --force-recreate` dari worktree development. Gunakan hanya grup pengujian; jangan masukkan grup produksi. Session WAHA harus tersedia dan WORKING sebelum workflow diaktifkan.
+Compose membaca `SPOTIFY_CLIENT_ID`, `WAHA_URL`, `WAHA_API_KEY`, dan `WAHA_SESSION` dari `.env` worktree development. `WHATSAPP_GROUP_IDS` hanya dipakai untuk binding Ruang utama saat database identitas pertama kali dibuat. Development mewajibkan `WHATSAPP_BLOCKED_GROUP_IDS` berisi ID grup produksi yang dilayani oleh session WAHA bersama. Setelah mengubah `.env`, jalankan `docker compose up -d --force-recreate` dari worktree development.
 
 Workflow n8n development: `xanTFAOSvArYVB9E` (Ruang Musik · DEVELOPMENT), aktif. Session WAHA `carubra` digunakan bersama dengan filter grup pengujian terpisah; webhook lama dipertahankan. Credential API development terpisah dari produksi. Registrasi webhook memulai ulang session WAHA; lakukan perubahan berikutnya pada waktu yang sesuai. Script provisioning `scripts/n8n/setup-development.cjs` hanya untuk pembuatan pertama, bukan dijalankan ulang pada workflow yang sudah tersedia.
 
 ### Multi-ruang
 
-Login admin awal memakai `owner@local` dan `ADMIN_PASSWORD` pada `.env` development. Pilih atau buat ruang dari bar atas. Pemilik ruang dapat mengundang anggota atau operator dari Pengaturan. Tautan undangan berlaku 24 jam dan sekali pakai. Bagikan tautan hanya ke orang yang diundang. Akun yang sudah terdaftar langsung ditambahkan ke ruang dengan peran yang dipilih.
+Login admin awal memakai `owner@local` dan `ADMIN_PASSWORD` pada `.env` development. Dashboard awal menampilkan kartu ruang, status pemutar, jumlah request, serta koneksi Spotify dan WhatsApp. Admin melihat semua ruang, pengguna lainnya melihat ruang sesuai akses. Pilih **Buka ruang** untuk masuk ke player dan antrean ruang. Pemilik ruang dapat mengundang anggota atau operator dari Pengaturan. Tautan undangan berlaku 24 jam dan sekali pakai. Akun yang sudah terdaftar langsung ditambahkan ke ruang dengan peran yang dipilih.
 
-Anggota dapat mencari dan meminta lagu. Operator juga dapat mengatur player dan antrean. Pemilik mengelola koneksi Spotify, grup WhatsApp, serta keanggotaan. Admin memiliki akses ke seluruh ruang.
+Anggota dapat mencari dan meminta lagu. Operator dapat mengatur player dan antrean. Pemilik dan operator dapat memasangkan grup WhatsApp dan menghubungkan Spotify. Pemilik juga dapat melepas grup serta mengelola keanggotaan.
 
 Hubungkan akun Spotify Premium berbeda untuk setiap ruang yang akan memutar bersamaan. Callback tetap `https://dev-spotify.carubra.com/auth/spotify/callback`. Browser yang aktif mengeluarkan audio untuk ruang yang dipilih.
 
-Untuk memasangkan grup lain, masukkan ID grup pengujian ke `WHATSAPP_GROUP_IDS` di `.env` development dan buat ulang container. Di Pengaturan ruang, masukkan ID grup itu lalu kirim `/hubungkan KODE` dari grup tersebut dalam 10 menit. Workflow n8n development meneruskan session dan grup ke backend untuk pemilihan ruang. Jika grup sudah berada di ruang lain, lepaskan dari ruang asal terlebih dahulu. Admin dapat memindahkan grup dari Ruang utama dengan kode yang sama. Riwayat dan antrean tetap berada di ruang tempat request dibuat.
+Untuk memasangkan grup pengujian:
+
+1. Tambahkan nomor WhatsApp Carubra ke grup.
+2. Buat ruang dan buka **Pengaturan**. Salin perintah `/hubungkan KODE` lalu kirim ke grup tersebut. Kode berlaku 10 menit dan sekali pakai. Setelah kedaluwarsa, buat kode baru dari Pengaturan.
+3. Bot memeriksa pesan melalui WAHA, lalu mengonfirmasi nama ruang dan status Spotify di grup. Jika Spotify belum terhubung, hubungkan akun Premium dari Pengaturan. Bot mengirim kabar saat Spotify berhasil terhubung. Aktifkan browser player pada perangkat yang mengeluarkan suara.
+
+Satu grup hanya dapat dipasangkan ke satu ruang. Pemilik perlu melepas grup dari ruang asal sebelum memasangkannya ke ruang baru. Antrean dan riwayat tetap tersimpan di ruang asal. Workflow n8n development yang sama meneruskan command semua ruang, termasuk pairing, ke aplikasi.
 
 Database `player.sqlite` lama tetap dipakai oleh Ruang utama, termasuk antrean dan koneksi Spotify yang sudah tersimpan. `identity.sqlite` menyimpan akun dan keanggotaan. Ruang baru memiliki database sendiri di `rooms/`. Gunakan `scripts/backup.ps1` untuk mencadangkan ketiganya.

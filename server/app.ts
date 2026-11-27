@@ -14,16 +14,22 @@ import { whatsappCommand } from './whatsapp.ts';
 import { Queue } from './queue.ts';
 import { SpotifyObserver } from './spotify-observer.ts';
 import { Notifications } from './notifications.ts';
-import { Identity, type Role } from './identity.ts';
+import { Identity, type Role, type User } from './identity.ts';
+import { verifyWahaMessage, type IncomingMessage } from './waha.ts';
 import { equal, hash, secret } from './crypto.ts';
 import { AppError, type SongRequest } from './types.ts';
 import type { Config } from './config.ts';
-export function createApp(config: Config, provided?: Store) {
+export function createApp(config: Config, provided?: Store, services: {
+  verifyPairingMessage?: (message: IncomingMessage) => Promise<boolean>
+} = {}) {
   const store = provided || new Store(join(config.dataDir, 'player.sqlite')), spotify = new Spotify(config, store), queue = new Queue(store, spotify);
-  const identity = new Identity(provided ? ':memory:' : join(config.dataDir, 'identity.sqlite'), config.password, config.groupIds, config.wahaSession);
-  const allowedGroup = (groupId: string) => groupId !== '0@g.us' && config.groupIds.includes(groupId);
+  const blockedGroups = new Set(['0@g.us', ...config.blockedGroupIds]);
+  const bootstrapGroups = config.groupIds.filter(id => !blockedGroups.has(id));
+  const identity = new Identity(provided ? ':memory:' : join(config.dataDir, 'identity.sqlite'), config.password, bootstrapGroups, config.wahaSession, config.encryptionKey);
+  const verifyPairingMessage = services.verifyPairingMessage ?? (message => verifyWahaMessage(config,message));
+  const verifyBoundMessages = !!(services.verifyPairingMessage || (config.wahaUrl && config.wahaKey));
   const notificationsFor = (roomId: string, roomStore: Store) => new Notifications(roomStore, config, groupId =>
-    allowedGroup(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
+    !blockedGroups.has(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
   const notifications = notificationsFor('default', store);
   type Runtime = { id: string; name: string; store: Store; spotify: Spotify; queue: Queue; notifications: Notifications; observer: SpotifyObserver; integrationSerial?: Promise<void> };
   const runtimes = new Map<string, Runtime>();
@@ -47,6 +53,16 @@ export function createApp(config: Config, provided?: Store) {
   const observer = initial.observer;
   const clients = new Map<string, { socket: WebSocket; token: string; roomId: string }>();
   const controllers: Role[] = ['owner','operator'];
+  const roomCards = (user: User) => identity.rooms(user).map(room => {
+    const rt = runtime(room.id);
+    const playback = rt.queue.playback;
+    const playerConnected = !!rt.queue.lease && Date.now() - rt.queue.lease.updatedAt <= 30000;
+    const current = rt.queue.current();
+    const isPlaying = playerConnected && current?.status === 'playing' && !playback.paused;
+    const queuedCount = Number(rt.store.db.prepare("SELECT COUNT(*) AS count FROM requests WHERE status='queued'").get()?.count || 0);
+    return {...room, spotifyConnected:rt.spotify.connected, playerConnected, isPlaying,
+      currentTrack:current && isPlaying ? {title:current.title,artist:current.artist} : null, queuedCount};
+  });
   app.disable('x-powered-by'); app.set('trust proxy', config.trustProxy);
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://sdk.scdn.co'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://i.scdn.co', 'https://mosaic.scdn.co', 'https://image-cdn-ak.spotifycdn.com', 'https://image-cdn-fa.spotifycdn.com'], connectSrc: ["'self'", 'https://*.spotify.com', 'https://*.scdn.co', 'wss://*.spotify.com'], frameSrc: ['https://sdk.scdn.co', 'https://*.spotify.com'], mediaSrc: ["'self'", 'blob:', 'https://*.scdn.co', 'https://*.spotifycdn.com'], upgradeInsecureRequests: config.cookieSecure ? [] : null } }, crossOriginEmbedderPolicy: false, crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }, strictTransportSecurity: config.cookieSecure ? undefined : false }));
   app.use(express.json({ limit: '16kb' }), cookieParser());
@@ -56,7 +72,7 @@ export function createApp(config: Config, provided?: Store) {
   const auth: express.RequestHandler = (req, res, next) => { try { userFor(req); res.set('Cache-Control', 'no-store'); next(); } catch { res.status(401).json({ error: 'Masuk terlebih dahulu.' }); } };
   const sameOrigin: express.RequestHandler = (req, res, next) => { const origin = req.get('origin'); if (origin !== config.origin && !(process.env.NODE_ENV !== 'production' && origin === 'http://127.0.0.1:5173')) { res.status(403).json({ error: 'Origin tidak diizinkan.' }); return; } next(); };
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.path.startsWith('/integrations/')) return sameOrigin(req, res, next); next(); });
-  app.get('/api/session', (req, res) => { const user = identity.session(req.cookies.carubra_session || ''); res.json({ authenticated: !!user, user, rooms: user ? identity.rooms(user) : [], appName: 'Ruang Musik', origin: config.origin }); });
+  app.get('/api/session', (req, res) => { const user = identity.session(req.cookies.carubra_session || ''); res.json({ authenticated: !!user, user, rooms: user ? roomCards(user) : [], appName: 'Ruang Musik', origin: config.origin }); });
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Terlalu banyak percobaan login. Tunggu 15 menit.' } });
   app.post('/api/login', loginLimit, (req, res) => {
     const body = z.object({ email: z.string().email().or(z.literal('owner@local')).optional(), password: z.string().max(256) }).parse(req.body);
@@ -72,7 +88,7 @@ export function createApp(config: Config, provided?: Store) {
     }
     res.clearCookie('carubra_session', { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, path: '/' }).json({ ok: true });
   });
-  app.get('/api/rooms', auth, (req, res) => res.json({ rooms: identity.rooms(userFor(req)) }));
+  app.get('/api/rooms', auth, (req, res) => res.json({ rooms: roomCards(userFor(req)) }));
   app.post('/api/rooms', auth, (req, res) => { const name = z.string().trim().min(2).max(80).regex(/^[^\r\n]+$/).parse(req.body.name); const id = identity.createRoom(userFor(req),name); res.status(201).json({id,name}); });
   app.get('/api/rooms/:id/members', auth, (req,res) => {
     res.json({members:identity.members(userFor(req),String(req.params.id))});
@@ -97,13 +113,13 @@ export function createApp(config: Config, provided?: Store) {
     }
     res.json({ok:true});
   });
-  app.post('/api/rooms/:id/groups', auth, (req,res) => {
-    const actor = userFor(req), roomId = String(req.params.id);
-    identity.require(actor,roomId,['owner']);
-    const body = z.object({groupId:z.string().regex(/^[0-9]+@g\.us$/),session:z.string().default(config.wahaSession)}).parse(req.body);
-    if (!allowedGroup(body.groupId) || body.session !== config.wahaSession) throw new AppError('Grup tidak terdaftar untuk lingkungan ini.',403);
-    const code = identity.beginPairing(actor,roomId,body.groupId,body.session);
-    res.status(201).json({code});
+  app.get('/api/rooms/:id/pairing', auth, (req,res) => {
+    const verification = identity.verificationCode(userFor(req),String(req.params.id));
+    res.json({code:verification?.code ?? null,expiresAt:verification?.expires ?? null});
+  });
+  app.post('/api/rooms/:id/pairing', auth, (req,res) => {
+    const verification = identity.regenerateVerificationCode(userFor(req),String(req.params.id));
+    res.status(201).json({code:verification.code,expiresAt:verification.expires});
   });
   app.delete('/api/rooms/:id/groups/:groupId', auth, (req,res) => {
     identity.unbindGroup(userFor(req),String(req.params.id),String(req.params.groupId));
@@ -123,7 +139,7 @@ export function createApp(config: Config, provided?: Store) {
   app.get('/api/state', auth, async (req, res) => { const rt=roomFor(req); await rt.observer.refresh(); res.json(snapshot(rt)); });
   app.get('/auth/spotify', auth, (req, res) => {
     const roomId = z.string().uuid().or(z.literal('default')).parse(req.query.room || 'default');
-    identity.require(userFor(req),roomId,['owner']);
+    identity.require(userFor(req),roomId,controllers);
     const rt = runtime(roomId);
     if (!config.clientId) throw new AppError('Spotify belum dikonfigurasi.',409);
     const state = roomId + '.' + secret(), verifier = secret();
@@ -141,7 +157,7 @@ export function createApp(config: Config, provided?: Store) {
   app.get('/auth/spotify/callback', auth, async (req, res) => {
     const state = z.string().max(90).parse(req.query.state);
     const roomId = z.string().uuid().or(z.literal('default')).parse(state.split('.')[0]);
-    identity.require(userFor(req),roomId,['owner']);
+    identity.require(userFor(req),roomId,controllers);
     const rt = runtime(roomId);
     const row = rt.store.db.prepare('SELECT verifier FROM oauth WHERE state=? AND session_hash=? AND expires>?')
       .get(state,hash(req.cookies.carubra_session),Date.now()) as {verifier:string}|undefined;
@@ -158,13 +174,17 @@ export function createApp(config: Config, provided?: Store) {
       if (typeof legacyProfile?.id !== 'string' || !legacyProfile.id) throw new AppError('Identitas Spotify Ruang utama belum tersedia.',409);
       if (!identity.spotifyId('default')) identity.bindSpotify('default',legacyProfile.id);
     }
-    identity.require(userFor(req),roomId,['owner']);
+    identity.require(userFor(req),roomId,controllers);
     await rt.queue.run(async () => {
-      identity.require(userFor(req),roomId,['owner']);
+      identity.require(userFor(req),roomId,controllers);
       if (rt.queue.lease && identity.spotifyId(roomId) !== profile.id) throw new AppError('Lepaskan player ruang sebelum mengganti akun Spotify.',409);
       rt.store.transaction(() => {
+        const wasConnected = rt.spotify.connected;
         rt.store.set('spotifyTokens',encryptedTokens);
         rt.store.set('spotifyAccount',{id:profile.id,displayName:profile.display_name || 'Spotify',product:profile.product});
+        if (!wasConnected) for (const groupId of identity.groupsForRoom(roomId,config.wahaSession)) {
+          rt.notifications.enqueueSpotifyReady({groupId,roomName:rt.name,roomUrl:config.origin+'/?room='+roomId});
+        }
         identity.bindSpotify(roomId,profile.id);
       });
     });
@@ -221,30 +241,57 @@ export function createApp(config: Config, provided?: Store) {
     res.json({ok:true});
   });
   const whatsappPayload = z.object({
-    groupId:z.string(),session:z.string().max(100).default(config.wahaSession),
+    groupId:z.string().max(100),session:z.string().max(100).default(config.wahaSession),
     senderId:z.string().regex(/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/),messageId:z.string().min(1).max(250),
     text:z.string().trim().min(1).max(1000),requester:z.string().trim().max(60).default('Anggota WhatsApp')
   });
   const verifyWhatsapp: express.RequestHandler = (req,res,next) => {
     if (!config.integrationToken || !equal(req.get('authorization') || '', 'Bearer ' + config.integrationToken)) throw new AppError('Integration token tidak valid.', 401);
     const body = whatsappPayload.parse(req.body);
-    if (!allowedGroup(body.groupId) || body.session !== config.wahaSession) throw new AppError('Grup atau session tidak diizinkan.',403);
-    res.locals.whatsapp = body;
+    if (!/^[0-9]+@g\.us$/.test(body.groupId) || blockedGroups.has(body.groupId) || body.session !== config.wahaSession) {
+      throw new AppError('Grup atau session tidak diizinkan.',403);
+    }
+    const pairing = body.text.match(/^\/hubungkan(?:\s+([\s\S]*))?$/i);
+    const roomId = identity.roomForGroup(body.groupId,body.session);
+    if (!pairing && !roomId) throw new AppError('Grup belum terhubung ke ruang.',403);
+    res.locals.whatsapp = {body,pairing,roomId};
     next();
   };
   app.post('/api/integrations/whatsapp', verifyWhatsapp, rateLimit({windowMs:60000,limit:40,legacyHeaders:false}), async (_req,res) => {
-    const body = res.locals.whatsapp as z.output<typeof whatsappPayload>;
+    const {body,pairing,roomId} = res.locals.whatsapp as {
+      body:z.output<typeof whatsappPayload>; pairing:RegExpMatchArray|null; roomId:string|null
+    };
     const receiptId = body.groupId + ':' + body.messageId;
-    const pairing = body.text.match(/^\/hubungkan(?:\s+(\S+))?$/i);
     if (pairing) {
-      const reply = identity.pairingReply(body.groupId,body.session,pairing[1] || '',receiptId);
-      res.json(reply);
+      if (!await verifyPairingMessage(body)) throw new AppError('Asal pesan WhatsApp tidak terverifikasi.',403);
+      const prior = identity.beginCommand(receiptId);
+      if (prior) { res.json({reply:prior,duplicate:true}); return; }
+      let reply: string;
+      let commandFailed = false;
+      try {
+        const result = identity.consumeVerification(body.groupId,body.session,(pairing[1] || '').trim().toLowerCase());
+        const rt = runtime(result.roomId);
+        const roomUrl = config.origin + '/?room=' + result.roomId;
+        const spotifyStatus = rt.spotify.connected
+          ? 'Spotify sudah terhubung. Kirim /play judul lagu untuk membuat request. Aktifkan player di dashboard untuk memutar.'
+          : 'Spotify belum terhubung. Pemilik atau operator perlu menghubungkan Spotify Premium di dashboard sebelum request dapat diproses.';
+        reply = 'Grup ini berhasil terhubung ke ruang *' + rt.name + '*.\n\n' + spotifyStatus + '\n\n' + roomUrl;
+        broadcast(rt);
+      } catch (error) {
+        if (!(error instanceof AppError)) throw error;
+        reply = error.message;
+        commandFailed = true;
+      }
+      identity.saveReply(receiptId,reply);
+      res.json({reply,commandFailed});
       return;
     }
     const legacyReceipt = store.db.prepare('SELECT reply FROM receipts WHERE id=?').get(receiptId) as {reply:string}|undefined;
     if (legacyReceipt) { res.json({reply:legacyReceipt.reply,duplicate:true}); return; }
-    const roomId = identity.roomForGroup(body.groupId,body.session);
     if (!roomId) throw new AppError('Grup belum terhubung ke ruang.',403);
+    if (verifyBoundMessages && !await verifyPairingMessage(body)) {
+      throw new AppError('Asal pesan WhatsApp tidak terverifikasi.',403);
+    }
     const rt = runtime(roomId);
     const previousIntegration = rt.integrationSerial;
     let finishIntegration!: () => void;

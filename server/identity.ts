@@ -2,12 +2,12 @@ import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomUUID, randomBytes, scryptSync, timingSafeEqual } from 'node:crypto';
-import { hash, secret } from './crypto.ts';
+import { decrypt, encrypt, hash, secret } from './crypto.ts';
 import { AppError } from './types.ts';
 
 export type Role = 'owner' | 'operator' | 'member';
 export interface User { id: string; email: string; name: string; admin: boolean }
-export interface Room { id: string; name: string; role: Role; groupId: string | null }
+export interface Room { id: string; name: string; role: Role; groupId: string | null; ownerName: string }
 
 function passwordHash(password: string, salt = randomBytes(16).toString('hex')) {
   return salt + ':' + scryptSync(password, salt, 64).toString('hex');
@@ -19,7 +19,9 @@ function verifyPassword(password: string, stored: string) {
 }
 export class Identity {
   db: DatabaseSync;
-  constructor(file: string, private bootstrapPassword: string, defaultGroups: string[], session = 'carubra') {
+  constructor(file: string, private bootstrapPassword: string, defaultGroups: string[], session = 'carubra', private encryptionKey = randomBytes(32).toString('hex')) {
+    if (file !== ':memory:' && arguments.length < 5) throw new Error('ENCRYPTION_KEY diperlukan untuk penyimpanan kode verifikasi.');
+    if (!/^[a-f0-9]{64}$/i.test(this.encryptionKey)) throw new Error('ENCRYPTION_KEY harus 64 karakter hex.');
     if (file !== ':memory:') mkdirSync(dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
     this.db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;
@@ -30,7 +32,7 @@ export class Identity {
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS spotify_accounts (spotify_id TEXT PRIMARY KEY, room_id TEXT NOT NULL UNIQUE REFERENCES rooms(id));
       CREATE TABLE IF NOT EXISTS invitations (hash TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), email TEXT NOT NULL COLLATE NOCASE, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('operator','member')), expires INTEGER NOT NULL, UNIQUE(room_id,email));
-      CREATE TABLE IF NOT EXISTS group_pairings (hash TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), group_id TEXT NOT NULL UNIQUE, session TEXT NOT NULL, expires INTEGER NOT NULL, previous_room TEXT);
+      CREATE TABLE IF NOT EXISTS room_verifications (room_id TEXT PRIMARY KEY REFERENCES rooms(id) ON DELETE CASCADE, code_hash TEXT NOT NULL UNIQUE, code_ciphertext TEXT NOT NULL, expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS command_receipts (id TEXT PRIMARY KEY, reply TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS room_members_user ON room_members(user_id);
       CREATE INDEX IF NOT EXISTS room_groups_room ON room_groups(room_id);`);
@@ -67,9 +69,9 @@ export class Identity {
   }
   logout(token: string) { this.db.prepare('DELETE FROM sessions WHERE hash=?').run(hash(token)); }
   rooms(user: User): Room[] {
-    return this.db.prepare(`SELECT r.id,r.name,CASE WHEN ?=1 THEN 'owner' ELSE m.role END role,
+    return this.db.prepare(`SELECT r.id,r.name,u.name ownerName,CASE WHEN ?=1 THEN 'owner' ELSE m.role END role,
       (SELECT group_id FROM room_groups WHERE room_id=r.id ORDER BY group_id LIMIT 1) groupId
-      FROM rooms r LEFT JOIN room_members m ON m.room_id=r.id AND m.user_id=?
+      FROM rooms r JOIN users u ON u.id=r.owner_id LEFT JOIN room_members m ON m.room_id=r.id AND m.user_id=?
       WHERE ?=1 OR m.role IS NOT NULL ORDER BY r.created_at,r.id`).all(+user.admin,user.id,+user.admin) as unknown as Room[];
   }
   role(user: User, roomId: string): Role | null {
@@ -86,13 +88,51 @@ export class Identity {
     const row = this.db.prepare('SELECT room_id roomId FROM room_groups WHERE group_id=? AND session=?').get(group, session) as {roomId:string}|undefined;
     return row?.roomId || null;
   }
+  groupsForRoom(roomId: string, session: string) {
+    return this.db.prepare('SELECT group_id FROM room_groups WHERE room_id=? AND session=?')
+      .all(roomId,session).map(row => String(row.group_id));
+  }
   createRoom(owner: User, name: string) {
     const id = randomUUID();
     this.transaction(() => {
       this.db.prepare('INSERT INTO rooms VALUES(?,?,?,?)').run(id,name,owner.id,Date.now());
       this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(id,owner.id,'owner');
+      this.issueVerification(id);
     });
     return id;
+  }
+  private issueVerification(roomId: string) {
+    const code = randomBytes(9).toString('hex');
+    const expires = Date.now() + 10 * 60_000;
+    this.db.prepare(`INSERT INTO room_verifications VALUES(?,?,?,?)
+      ON CONFLICT(room_id) DO UPDATE SET code_hash=excluded.code_hash,code_ciphertext=excluded.code_ciphertext,expires=excluded.expires`)
+      .run(roomId,hash(code),encrypt(code,this.encryptionKey),expires);
+    return {code,expires};
+  }
+  verificationCode(actor: User, roomId: string) {
+    this.require(actor,roomId,['owner','operator']);
+    if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) return null;
+    const row = this.db.prepare('SELECT code_ciphertext ciphertext,expires FROM room_verifications WHERE room_id=?').get(roomId) as {ciphertext:string;expires:number}|undefined;
+    if (!row) return this.issueVerification(roomId);
+    if (row.expires <= Date.now()) return null;
+    return {code:decrypt<string>(row.ciphertext,this.encryptionKey),expires:row.expires};
+  }
+  regenerateVerificationCode(actor: User, roomId: string) {
+    this.require(actor,roomId,['owner','operator']);
+    if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) throw new AppError('Ruang ini sudah terhubung ke grup.',409);
+    return this.issueVerification(roomId);
+  }
+  consumeVerification(groupId: string, session: string, code: string) {
+    return this.transaction(() => {
+      const pairing = this.db.prepare(`SELECT v.room_id roomId,r.name roomName FROM room_verifications v
+        JOIN rooms r ON r.id=v.room_id WHERE v.code_hash=? AND v.expires>?`).get(hash(code),Date.now()) as {roomId:string;roomName:string}|undefined;
+      if (!pairing) throw new AppError('Kode verifikasi tidak valid atau kedaluwarsa.',409);
+      if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(pairing.roomId)) throw new AppError('Ruang ini sudah terhubung ke grup.',409);
+      if (this.db.prepare('SELECT 1 FROM room_groups WHERE group_id=?').get(groupId)) throw new AppError('Grup sudah terhubung ke ruang lain.',409);
+      this.db.prepare('INSERT INTO room_groups VALUES(?,?,?)').run(groupId,pairing.roomId,session);
+      this.db.prepare('DELETE FROM room_verifications WHERE room_id=?').run(pairing.roomId);
+      return {...pairing,groupId};
+    });
   }
   invite(actor: User, roomId: string, email: string, name: string, role: Exclude<Role,'owner'>) {
     this.require(actor,roomId,['owner']);
@@ -139,38 +179,7 @@ export class Identity {
     this.transaction(() => {
       const result = this.db.prepare('DELETE FROM room_groups WHERE room_id=? AND group_id=?').run(roomId,groupId);
       if (!result.changes) throw new AppError('Grup tidak terhubung ke ruang ini.',409);
-      this.db.prepare('DELETE FROM group_pairings WHERE group_id=?').run(groupId);
-    });
-  }
-  beginPairing(actor: User, roomId: string, groupId: string, session: string) {
-    this.require(actor,roomId,['owner']);
-    const previous = this.roomForGroup(groupId,session);
-    if (previous && previous !== roomId && (previous !== 'default' || this.role(actor,previous) !== 'owner')) {
-      throw new AppError('Grup sudah terhubung ke ruang lain.',409);
-    }
-    if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=? AND group_id<>?').get(roomId,groupId)) {
-      throw new AppError('Ruang ini sudah terhubung dengan grup lain.',409);
-    }
-    const code = randomBytes(9).toString('hex');
-    this.db.prepare(`INSERT INTO group_pairings VALUES(?,?,?,?,?,?) ON CONFLICT(group_id)
-      DO UPDATE SET hash=excluded.hash,room_id=excluded.room_id,session=excluded.session,expires=excluded.expires,previous_room=excluded.previous_room`)
-      .run(hash(code),roomId,groupId,session,Date.now()+600000,previous);
-    return code;
-  }
-  finishPairing(groupId: string, session: string, code: string) {
-    return this.transaction(() => {
-      const pairing = this.db.prepare('SELECT * FROM group_pairings WHERE hash=? AND group_id=? AND session=? AND expires>?')
-        .get(hash(code),groupId,session,Date.now()) as {room_id:string; previous_room:string|null}|undefined;
-      if (!pairing || this.roomForGroup(groupId,session) !== pairing.previous_room) {
-        throw new AppError('Kode pemasangan tidak valid atau kedaluwarsa.',409);
-      }
-      if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=? AND group_id<>?').get(pairing.room_id,groupId)) {
-        throw new AppError('Ruang ini sudah terhubung dengan grup lain.',409);
-      }
-      this.db.prepare('INSERT INTO room_groups VALUES(?,?,?) ON CONFLICT(group_id) DO UPDATE SET room_id=excluded.room_id,session=excluded.session')
-        .run(groupId,pairing.room_id,session);
-      this.db.prepare('DELETE FROM group_pairings WHERE hash=?').run(hash(code));
-      return pairing.room_id;
+      if (!this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) this.issueVerification(roomId);
     });
   }
   beginCommand(id: string) {
@@ -181,23 +190,6 @@ export class Identity {
   }
   saveReply(id: string, reply: string) {
     this.db.prepare('UPDATE command_receipts SET reply=? WHERE id=?').run(reply,id);
-  }
-  pairingReply(groupId: string, session: string, code: string, receiptId: string) {
-    const prior = this.beginCommand(receiptId);
-    if (prior) return {reply:prior,duplicate:true};
-    let reply: string;
-    let commandFailed = false;
-    try {
-      const roomId = this.finishPairing(groupId,session,code);
-      const room = this.db.prepare('SELECT name FROM rooms WHERE id=?').get(roomId) as {name:string};
-      reply = 'Grup berhasil dihubungkan ke ruang ' + room.name + '.';
-    } catch (error) {
-      if (!(error instanceof AppError)) throw error;
-      reply = error.message;
-      commandFailed = true;
-    }
-    this.saveReply(receiptId,reply);
-    return {reply,commandFailed};
   }
   bindSpotify(roomId: string, spotifyId: string) {
     this.transaction(() => {

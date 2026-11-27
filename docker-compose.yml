@@ -11,6 +11,7 @@ services:
       PORT: 3210
       APP_ORIGIN: https://dev-spotify.carubra.com
       DATA_DIR: /app/data
+      REQUIRE_WHATSAPP_GROUP_BLOCKLIST: "true"
     ports:
       - "127.0.0.1:3211:3210"
     volumes:
