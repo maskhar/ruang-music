@@ -1,78 +1,81 @@
 # Ruang Musik · Carubra
 
-Player Spotify berbasis browser/PWA untuk ruang internal. Audio langsung dari Spotify Web Playback SDK ke browser player. Server tidak mengunduh, menyimpan, atau membagikan ulang audio.
+Browser player Spotify dengan antrean request bersama. Semua request WhatsApp/web disimpan di server; Spotify hanya menerima satu lagu ketika request mendapat giliran. Audio langsung dari Spotify Web Playback SDK ke browser player.
 
-Source: `I:\website-devops\spotify-player`. Domain: `https://spotify.carubra.com`.
+## Alur aktif
 
-## Status pemasangan
+1. `/play judul artis`, URL track, album, atau playlist masuk antrean aplikasi.
+2. Server menyimpan track, identitas peminta, ID grup/pesan asal, dan urutan FIFO dalam SQLite.
+3. Jika player aktif dan kosong, request pertama mulai otomatis. Request baru tidak mengganti lagu berjalan.
+4. Ketika SDK melaporkan lagu selesai, server menjeda continuation Spotify lalu mengirim satu request berikutnya.
+5. Setelah URI request terkonfirmasi berjalan, request menjadi Sedang diputar dan notifikasi WAHA menyebut peminta di grup asal.
+6. Clear/hapus hanya mengubah request menunggu, tanpa mutation Spotify dan tanpa menghentikan lagu aktif.
 
-Docker service `spotify-player` tersedia pada `127.0.0.1:3210`, tergabung `carubra-network`. Client ID dari aplikasi Spotify yang dipakai n8n dan kredensial WAHA sudah diisi secara lokal. `.env` menyimpan password operator, kunci enkripsi, dan integration token; file ini diabaikan Git. Jangan membagikan file tersebut.
+Browser hanya menampilkan dan memainkan request. Database server menjadi sumber antrean: refresh, browser tertutup, dan restart container tidak menghapusnya. Browser harus tetap aktif untuk audio dan pergantian lagu otomatis. Jika terputus, aktifkan kembali player; autoplay browser kadang tetap meminta sentuhan.
 
-Domain dan login Spotify dapat dipakai sesuai konfigurasi aktif. Workflow n8n lama masih mengisi antrean Spotify; dashboard kini menyinkronkan playback dan antrean tersebut tanpa cutover. Adapter antrean aplikasi tetap tersedia pada `integration/n8n-waha-adapter.json`.
+## WhatsApp
 
-## Mengaktifkan domain dan Spotify
+Session `carubra`, credential `WAHA account`. Dua grup berbagi satu player/antrean:
 
-1. Di Cloudflare Zero Trust, buka tunnel yang digunakan container `network-carubra`. Tambahkan published application/public hostname `spotify.carubra.com`, service type **HTTP**, URL **spotify-player:3210**. DNS untuk hostname harus dibuat melalui tunnel tersebut. Aktifkan WebSocket bila ada pengaturan proxy tambahan. Jangan memilih `localhost:3210` karena tunnel berjalan dalam container.
-2. Di Spotify Developer Dashboard untuk Client ID pada `.env`, tambahkan redirect URI persis `https://spotify.carubra.com/auth/spotify/callback`, lalu simpan. Aktifkan penggunaan Web Playback SDK/Web API bila diminta. Akun pengguna harus diizinkan oleh aplikasi Spotify, sesuai batas development mode Spotify.
-Login Spotify cukup sekali untuk server ini. Token refresh diperbarui otomatis. Browser lain cukup login operator; hubungkan ulang Spotify hanya bila mengganti akun atau izin/token tidak valid.
+- `120363430180897172@g.us`
+- `120363412435389448@g.us`
 
-3. Buka domain tersebut. Masuk menggunakan `ADMIN_PASSWORD` pada `.env`. Tekan **Hubungkan Spotify**, lalu login melalui halaman resmi Spotify memakai akun Premium yang sama dengan akun pemutaran kantor.
-4. Di Chrome Android yang mendukung DRM/Widevine, tekan **Aktifkan player di browser ini**. Tambahkan satu request, lalu tekan **Putar**. Browser mungkin meminta sentuhan tambahan melalui **Aktifkan audio kembali**.
-5. Verifikasi audio benar-benar keluar dari perangkat tersebut sebelum mengalihkan WhatsApp. Dashboard lain bisa mengontrol antrean, tetapi hanya satu browser memiliki output aktif. Ambil alih meminta konfirmasi.
+DM, grup lain, pesan fromMe, media, dan pesan tanpa participant valid diabaikan. Anggota tidak perlu akun web. Balasan/notifikasi kembali ke grup asal, bukan disebar ke seluruh grup.
 
-Spotify Premium diperlukan; paket mobile-only tertentu tidak mendukung SDK. Dukungan browser, DRM, aturan Spotify, dan izin akun tetap berlaku. Pemakaian komersial SDK memerlukan izin Spotify. Biarkan player di depan; layar mati/background Android dapat menghentikan browser. PWA bisa dipasang melalui menu Chrome. Kontrol volume SDK tidak dijamin pada Android: gunakan tombol perangkat bila browser menolak.
+Workflow utama `mMKGZXtIS2uvso8W` kini menjadi adapter WAHA ke `POST /api/integrations/whatsapp`. Webhook asli dipertahankan. Workflow monitor lama `WJhwejxEcPWJpG6o` dinonaktifkan; notifikasi memakai outbox aplikasi. Tidak ada lagi node Spotify/AI yang memutar langsung pada workflow utama.
 
-## Fitur dan antrean
-
-- Request judul/artis, URL atau URI Spotify track, album, playlist. Pencarian teks mengambil track pertama berdasarkan relevansi Spotify; tidak mengklaim lagu/playlist paling populer. Pilihan hasil pencarian tersedia di web.
-- Maksimal 200 track per album/playlist; 500 request menunggu. Album mengikuti urutan Spotify. Lagu sama boleh diminta lebih dari sekali dan disimpan sebagai request terpisah.
-- Dashboard membaca lagu aktif beserta antrean Spotify setiap 5 detik selama operator terhubung, lalu mengirim snapshot lewat WebSocket. Nama, artis, cover, posisi, dan perubahan antrean ikut diperbarui tanpa reload. Request WhatsApp workflow lama terlihat sebagai **Antrean Spotify**; identitas peminta tidak ditebak.
-- Antrean aplikasi tersimpan dalam SQLite dan dikirim sebagai konteks URI Spotify saat diputar. Satu konteks memuat maksimal 100 track, kemudian diperbarui saat window bergeser. Tambah/hapus request saat lagu berjalan memperbarui konteks di posisi aktual Spotify; pada lagu dijeda, perubahan diterapkan saat Putar agar tidak menyalakan audio tanpa perintah. Antrean manual dari luar aplikasi tetap dikelola Spotify. Pergantian alami ke request berikutnya diadopsi tanpa memulai lagu itu dua kali. Lagu terakhir dibersihkan setelah SDK melaporkan akhir; continuation di luar request dihentikan. Lagu dari playlist/autoplay Spotify tidak dimasukkan sebagai request palsu.
-- Antrean native dan request aplikasi diberi sumber berbeda. Hapus/kosongkan hanya berlaku untuk request aplikasi, karena Spotify Web API tidak menyediakan hapus/clear antrean native. Ekor seragam minimal 3 salinan lagu aktif atau lagu yang telah dikenali sebagai duplikat usang disaring secara heuristik; daftar pengenal ini disimpan hingga 24 jam dan bertahan setelah restart. Spotify tidak menyediakan ID kejadian antrean, sehingga pengulangan native tidak dapat dibedakan sempurna; request berulang dalam antrean aplikasi tetap utuh.
-- Jeda, lanjut, berikutnya, volume, hapus satu request, kosongkan seluruh request menunggu dengan konfirmasi. Lagu aktif tetap berjalan saat antrean dikosongkan.
-- Saat player terputus dan Spotify tidak memutar request aktif, lagu lama tidak ditampilkan sebagai Now Playing. Setelah pembacaan Spotify yang berhasil berulang selama 15 detik (dan masa mulai minimal 30 detik), request aktif yang tidak lagi terdeteksi dipindahkan ke riwayat dengan status **Terhenti**. Gangguan API, jeda pada lagu yang sama, dan reconnect singkat tidak dianggap selesai. Request belum diputar tetap tersimpan dalam bagian **Request tersimpan**, terpisah dari jumlah antrean pemutaran, sampai player diaktifkan.
-- Riwayat 20 request terakhir. Tab yang sebelumnya diaktifkan sebagai player menyimpan penanda pemulihan di sessionStorage dan mencoba menyambung kembali setelah refresh/koneksi WebSocket kembali. Browser lain tetap sebagai dashboard, tanpa mengambil alih otomatis. Bila browser meminta interaksi audio, tekan Aktifkan audio lalu Putar. Menutup tab/browser tetap dapat menghentikan audio, tetapi request tidak dihapus. Posisi terakhir disimpan, tetapi kelanjutan audio tidak dijamin tanpa browser aktif.
-- Notifikasi WAHA di grup, mention pengirim dan balas pesan asal, setelah SDK melaporkan URI request sedang diputar. Ini konfirmasi state playback, bukan pengukuran speaker. Setiap request memiliki satu outbox notifikasi. Pengiriman ambigu tidak dicoba ulang otomatis agar tidak menggandakan pesan.
-- Password operator server-side; session HttpOnly, SameSite, Secure pada HTTPS. Token refresh Spotify dienkripsi AES-256-GCM. WebSocket memakai session dan origin. Dashboard tidak menerima ID WhatsApp privat.
-
-## Integrasi WhatsApp melalui n8n
-
-Grup yang diizinkan: `120363430180897172@g.us` dan `120363412435389448@g.us`. Konfigurasi memakai `WHATSAPP_GROUP_IDS` dipisahkan koma; `WHATSAPP_GROUP_ID` lama masih didukung sebagai fallback. Semua grup berbagi player/antrean Spotify yang sama. Balasan dan notifikasi dikirim hanya ke grup asal request. Session: `carubra`. Credential WAHA: `WAHA account`.
-
-Adapter belum aktif. Jangan jalankan adapter dan workflow lama untuk event yang sama. Urutan cutover:
-
-1. Export dan simpan backup workflow utama `mMKGZXtIS2uvso8W` serta monitor `WJhwejxEcPWJpG6o`. Catat webhook WAHA lama dan konfigurasi event/session. Backup tidak cukup jika hanya disimpan dalam container.
-2. Import `integration/n8n-waha-adapter.json` sebagai workflow nonaktif. Pada node **Request Ruang Musik**, pilih credential **Header Auth** baru: Name `Authorization`, Value `Bearer <INTEGRATION_TOKEN dari .env>`. Jangan menulis token langsung dalam JSON workflow. Node WAHA menggunakan credential `WAHA account`.
-3. Pastikan n8n dan player tergabung `carubra-network`, atau sesuaikan URL internal node HTTP. Server menerima event yang telah dinormalisasi oleh adapter: session carubra, pesan grup target, bukan fromMe, participant valid. Adapter mengabaikan DM dan event lain.
-4. Setelah login dan playback web berhasil, nonaktifkan workflow utama lama dan monitor lama. Aktifkan adapter dan arahkan webhook session WAHA `carubra` ke production webhook WAHA Trigger adapter. Catat konfigurasi lama untuk rollback. Langkah ini sengaja belum dilakukan pada pemasangan awal.
-5. Uji dari anggota grup: `/play judul artis`, `/queue`, tunggu giliran dimulai, verifikasi mention hanya sekali, lalu `/clearqueue`. Uji pesan DM tidak diproses. Jika gagal, nonaktifkan adapter, pulihkan webhook WAHA lama, lalu aktifkan kembali kedua workflow lama.
-
-Command adapter:
-
-| Command | Hasil |
+| Command | Perilaku |
 |---|---|
-| `/play judul artis` atau URL/URI Spotify | Request baru, otomatis mulai bila player aktif dan tidak ada request aktif |
-| `/play` atau `/resume` | Lanjutkan request aktif / mulai request menunggu |
-| `/queue` atau `/antrean` | Maksimal 10 request menunggu beserta peminta |
-| `/clearqueue` | Batalkan semua request menunggu; lagu aktif tetap berjalan |
-| `/pause` | Jeda, antrean tetap tersimpan |
-| `/stop` | Jeda dan batalkan semua request menunggu; lagu aktif dapat dilanjutkan |
-| `/next` | Lewati request aktif, mulai berikutnya |
-| `/help` | Panduan command |
+| `/play judul artis` | Cari hasil track pertama, simpan request, tampilkan judul/artis/tautan |
+| `/play URL_TRACK` | Gunakan ID track persis |
+| `/play URL_ALBUM` | Masukkan track album sesuai urutan |
+| `/playlist URL` atau `/play URL_PLAYLIST` | Urai playlist menjadi track, masukkan antrean; tidak mengganti playback langsung |
+| `/play playlist galau` | Pilih playlist relevan pertama Spotify, lalu baca track-nya |
+| `/play` atau `/resume` | Lanjutkan request aktif atau mulai request pertama |
+| `/queue`, `/antrean`, `/antrian` | Request aktif dan maksimal 10 request menunggu |
+| `/clearqueue` | Batalkan seluruh request menunggu; lagu aktif tetap berjalan |
+| `/pause` | Jeda; antrean tersimpan dan request baru tidak memulai playback otomatis |
+| `/next`, `/skip` | Lewati request aktif dan mulai request berikutnya |
+| `/stop` | Jeda player, hentikan request aktif, batalkan semua request menunggu |
+| `/vol 0–100`, `/volume` | Kirim kontrol volume ke browser player |
+| `/now`, `/np`, `/status` | Request aktif aplikasi |
+| `/cari judul artis` | Cari lagu tanpa memutar |
+| `/recent`, `/riwayat` | Riwayat request |
+| `/help` | Panduan |
 
-`/queue judul artis` dari workflow lama tidak dipakai sebagai penambahan pada adapter ini; gunakan `/play judul artis`. Volume tersedia lewat dashboard web. Command lama `/prev`, `/recent`, dan AI bebas tidak diteruskan oleh adapter.
+`/prev` dan asisten instruksi bebas `/spotify` lama tidak diteruskan; gunakan `/help`. Maksimal 200 track per album/playlist dan 500 request menunggu. Lagu sama boleh diminta beberapa kali sebagai request terpisah.
 
-Endpoint integrasi `POST /api/integrations/whatsapp`, Header `Authorization: Bearer <INTEGRATION_TOKEN>`, JSON:
+Playlist personal/playlist buatan Spotify bisa menghasilkan metadata 404 atau daftar track 403. Konsep antrean memerlukan daftar track; request ditolak dengan penjelasan tanpa mengganti lagu, tanpa fallback `context_uri`. Akses playlist yang tidak tersedia tidak dapat diatasi hanya dengan URL. Gunakan track, album, atau playlist yang dapat dibaca oleh aplikasi Spotify.
+
+## Player dan akun
+
+Satu akun Spotify untuk instalasi ini, satu browser sebagai sumber audio. Browser lain bisa login operator dan mengelola antrean. Login Spotify cukup sekali pada server, dengan token refresh terenkripsi. Hubungkan ulang bila Client ID berubah, ingin mengganti akun, atau token/izin tidak valid.
+
+Spotify Premium serta izin aplikasi Spotify diperlukan. Client ID bukan jenis paket Premium; akun Spotify yang login menentukan hak playback. Callback terdaftar:
+
+`https://spotify.carubra.com/auth/spotify/callback`
+
+Domain Cloudflare Tunnel mengarah ke `http://spotify-player:3210` di `carubra-network`. Browser Android memerlukan HTTPS, DRM/Widevine dan dukungan SDK. Volume Android mungkin hanya bisa lewat tombol perangkat. Pemakaian komersial mengikuti ketentuan Spotify.
+
+Saat membuka browser player pertama kali, tekan **Aktifkan player**. Request menunggu dapat mulai otomatis. Penanda tab player tersimpan dalam sessionStorage untuk mencoba pemulihan sesudah refresh; dashboard lain tidak otomatis mengambil alih. Untuk memindahkan audio, gunakan Ambil alih. Saat pause/stop, server menyimpan status jeda; `/resume` melanjutkan.
+
+Antrean native Spotify, playlist continuation, dan autoplay di luar aplikasi tidak diimpor sebagai request. Metadata lagu eksternal masih dapat terlihat sebagai playback luar aplikasi. Request baru menunggu lagu eksternal selesai bila browser player mendeteksinya. Untuk beralih ke antrean aplikasi segera, tekan Putar/berikutnya sesuai kontrol yang tersedia.
+
+## API integrasi
+
+`POST /api/integrations/whatsapp`, Header Auth `Authorization: Bearer <INTEGRATION_TOKEN>`:
 
 ```json
-{"groupId":"120363430180897172@g.us","senderId":"628123456789@c.us","messageId":"ID-UNIK-WAHA","requester":"Nama anggota","text":"/play judul artis"}
+{"groupId":"120363430180897172@g.us","senderId":"628123456789@c.us","messageId":"ID-ASLI-WAHA","requester":"Nama anggota","text":"/play judul artis"}
 ```
 
-Pakai message ID WAHA asli, bukan ID acak per retry. Server menyimpan receipt sebelum menjalankan command dan menserialkan event integrasi. Jika crash/timeout terjadi, periksa antrean; receipt mencegah eksekusi otomatis kedua. Server memberi `reply` untuk dikirim kembali adapter. Identitas dari endpoint dipercaya hanya bila integration token valid: jangan membagikan token kepada anggota.
+Server memeriksa token/grup/participant dan menyimpan receipt per grup+ID pesan sebelum command dijalankan. Duplicate tidak dijalankan atau dibalas ulang oleh adapter. Timeout mutation tidak dicoba ulang otomatis. Error command dikembalikan sebagai `reply` untuk dikirim ke pengguna. N8n harus tersambung ke `carubra-network`.
 
-## Menjalankan dan mengembangkan
+Notifikasi hanya setelah playback terkonfirmasi, satu outbox per request. Pengiriman ambigu ditandai uncertain tanpa pengiriman ulang otomatis. Kredensial WAHA pada `.env` dipakai outbox aplikasi; credential `WAHA account` pada n8n dipakai balasan command.
 
-Node.js 24 diperlukan karena menggunakan `node:sqlite`.
+## Operasional
+
+Source: `I:\website-devops\spotify-player`. Node.js 24, React/Vite, Express/WebSocket, SQLite. Tidak ada migration PostgreSQL.
 
 ```powershell
 cd I:\website-devops\spotify-player
@@ -80,43 +83,22 @@ npm ci
 npm run check
 npx playwright install chromium
 npm run test:browser
-docker compose up -d --build
-docker compose ps
-```
-
-Untuk pengembangan lokal, gunakan `.env` terpisah dengan `APP_ORIGIN=http://127.0.0.1:5173`, jalankan `npm run dev`, buka port 5173. Callback OAuth harus didaftarkan sesuai origin; HTTPS domain lebih cocok untuk Android. Jangan mengganti origin service produksi hanya untuk pengujian lokal. Browser tests memakai server port 3211 dan database memori, tanpa akun atau pesan WAHA nyata.
-
-Kode: `server/spotify-observer.ts` sinkronisasi antrean/playback native, `server/queue.ts` mesin antrean, `server/database.ts` penyimpanan, `server/spotify.ts` OAuth/API, `server/notifications.ts` outbox WAHA, `server/app.ts` API/WebSocket, `src/player.ts` SDK browser, `src/App.tsx` dashboard.
-
-## Backup dan pembaruan
-
-Volume persisten: `spotify-player_player-data`, berisi `/app/data/player.sqlite`. Jangan jalankan `docker compose down -v`. `.env` beserta `ENCRYPTION_KEY` harus dibackup terpisah dengan akses terbatas; database tanpa kunci tersebut tidak bisa memulihkan token Spotify.
-
-```powershell
 .\scripts\backup.ps1
 docker compose up -d --build
 docker compose ps
 Invoke-RestMethod http://127.0.0.1:3210/healthz
 ```
 
-Script backup memakai SQLite VACUUM INTO agar snapshot konsisten meski WAL aktif, lalu menyalin snapshot ke folder `backups` pada host. Backup satu komputer bukan pemulihan bila komputer rusak; salin ke penyimpanan lain. Simpan image lama sampai versi pengganti sehat. Untuk rollback gunakan image versi sebelumnya dengan volume yang sama; hentikan player lebih dulu sebelum mengganti database dari backup. Pemasangan awal ini tidak memiliki database lama untuk diimpor.
+Health memiliki `queueMode: application`. Password operator, Client ID, kunci enkripsi, WAHA key, dan integration token berada pada `.env` (diabaikan Git). `WHATSAPP_GROUP_IDS` menerima ID grup dipisahkan koma. Jangan bagikan `.env` atau token akses.
 
-Git repo lokal disiapkan; remote belum ditentukan sehingga belum ada push. `.env`, data, backup, dan hasil test tidak masuk Git.
+Volume `spotify-player_player-data` berisi `player.sqlite`. Jangan jalankan `docker compose down -v`. Backup SQLite melalui VACUUM INTO ke folder host `backups`; salin juga `.env` secara aman dan simpan backup di perangkat lain. Backup satu komputer bukan pemulihan bila komputer rusak. Simpan image pengganti sebelumnya untuk rollback.
 
-## URL playlist pada workflow WhatsApp aktif
+Polling Spotify hanya membaca `/me/player`, maksimal sekali per 15 detik untuk metadata/volume, dan mengikuti Retry-After saat 429. Antrean berasal dari SQLite dan broadcast WebSocket, sehingga tidak perlu membaca endpoint queue Spotify. SDK browser melaporkan progress setiap 3 detik.
 
-Workflow utama mengenali URL/URI playlist secara langsung, termasuk query `si` dan prefix `intl-id`, tanpa pencarian AI. `/play URL_PLAYLIST` memutar konteks playlist ketika idle; ketika lagu aktif, daftar track dibaca dan ditambahkan sesuai urutan (maksimal 200 item, lagu lokal/tidak tersedia dilewati). Jika Spotify menolak pembacaan daftar track dengan HTTP 403, tidak ada mutation antrean dan balasan menjelaskan batas akses. Playlist publik milik orang lain pun dapat terkena pembatasan API.
+## Cutover dan rollback
 
-Gunakan `/playlist URL_PLAYLIST` untuk memutar konteks playlist langsung tanpa membaca daftar track. Command ini menggantikan playback aktif; bukan menambahkan playlist ke antrean. Keberhasilan tetap bergantung izin playback Spotify dan perangkat aktif. `/help` sudah memuat command ini. Adapter staged aplikasi tidak menangani `/playlist` langsung; fitur ini berada pada workflow WhatsApp aktif `mMKGZXtIS2uvso8W`.
+Backup workflow sebelum perubahan tersedia di `backups/app-queue-cutover-20261127`, database via script backup. Script `scripts/n8n/app-queue-cutover.cjs` menggunakan helper API n8n pada container, menyiapkan Header Auth terenkripsi, mempertahankan webhook utama, lalu menonaktifkan monitor lama. Script `scripts/n8n/test-app-queue-adapter.cjs` menguji adapter secara terisolasi, tanpa pesan nyata.
 
-Script patch: `scripts/n8n/playlist-links.cjs`. Pengujian integrasi terisolasi: `scripts/n8n/test-playlist-links.cjs`, seluruh mutation Spotify dan pesan WAHA dimock; workflow sementara dibersihkan. Backup sebelum perubahan ada di `backups/playlist-20261126`.
+Rollback integrasi: pulihkan JSON workflow utama dari backup melalui API/import, aktifkan workflow utama dan monitor lama, lalu gunakan image sebelum app-queue. Jangan jalankan monitor lama dan outbox baru untuk request yang sama. Request yang sudah tersimpan di SQLite tetap dipertahankan. Riwayat/pending lama n8n tetap tersimpan dalam tabel lama dan tidak diimpor otomatis karena tidak dapat dipastikan masih valid.
 
-### Playlist personal dengan metadata HTTP 403/404
-
-Metadata playlist dapat ditolak meski tautan terbuka di aplikasi Spotify. `/playlist URL` kini tetap mencoba playback memakai `context_uri` tepat dari URL jika pembacaan metadata mendapat 403/404. Nama generic digunakan jika metadata tidak tersedia. `/play URL` saat idle memakai jalur langsung yang sama; saat lagu berjalan tetap membutuhkan daftar track untuk antrean dan tidak otomatis mengganti playback. HTTP 401/429/5xx tidak menjalankan fallback mutasi. Jika endpoint playback sendiri menolak playlist, kegagalan dilaporkan dan tidak dicatat sebagai sukses. Pemutaran nyata playlist personal tetap bergantung akun, playlist, dan perangkat Spotify.
-
-Patch: `scripts/n8n/playlist-metadata-fallback.cjs`. Delapan skenario workflow diuji terisolasi dengan mutation playback/WhatsApp tiruan, termasuk metadata 404/403, playback 404, dan rate limit.
-
-## Tombol pengelolaan antrean
-
-Saat daftar hanya berisi antrean native Spotify, dashboard menampilkan tombol **Kelola antrean Spotify** yang membuka penjelasan batas penghapusan dan tautan ke antrean Spotify. Tombol clear request tidak lagi ditampilkan nonaktif seolah dapat menghapus daftar native. Bila terdapat request aplikasi, penghapusan tetap meminta konfirmasi dan hanya membatalkan request tersebut. Jika konteks pemutaran aplikasi sedang dijeda sehingga belum dapat disinkronkan, hasil penghapusan menyebut perubahan diterapkan saat Putar dilanjutkan; pemutaran tidak dipaksa menyala.
+Remote Git belum ditentukan; commit lokal tersedia, belum bisa push.

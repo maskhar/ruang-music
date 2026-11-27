@@ -1,32 +1,42 @@
 {
-  "name": "Ruang Musik · WAHA adapter (staged)",
+  "name": "Ruang Musik · Antrean aplikasi · carubra",
   "nodes": [
     {
-      "parameters": {},
+      "id": "1121f18e-58d2-4f9b-aeec-4f0af8030b34",
+      "name": "WAHA Trigger",
+      "webhookId": "d032efbf-b702-4680-b1f5-b1e7a95e0554",
       "type": "n8n-nodes-waha.wahaTrigger",
       "typeVersion": 202411,
+      "position": [
+        -240,
+        0
+      ],
+      "parameters": {}
+    },
+    {
+      "id": "b1b57564-e44f-4805-9718-568bf3d46e1e",
+      "name": "Validasi grup dan peminta",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         0,
         0
       ],
-      "id": "1fda0a02-bede-4989-9dfa-4df019a174e1",
-      "name": "WAHA Trigger",
-      "webhookId": "c1cf88e9-1e47-4139-9e67-bd8bd9363d6e"
+      "parameters": {
+        "jsCode": "const event=$json.body??$json,p=event.payload??{};\nif(event.session!=='carubra'||event.event!=='message'||p.fromMe===true||p.hasMedia===true||![\"120363430180897172@g.us\",\"120363412435389448@g.us\"].includes(p.from)||!/^\\d+@(?:c\\.us|s\\.whatsapp\\.net|lid)$/.test(p.participant??'')||!/^\\//.test(String(p.body??'').trim())||!p.id)return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:String(p.body).trim(),requester:String(p._data?.notifyName??p.pushName??'Anggota WhatsApp').slice(0,60)}}];"
+      }
     },
     {
-      "parameters": {
-        "jsCode": "const event = $json.body || $json;\nconst p = event.payload || {};\nif (event.session !== 'carubra' || !['message','message.any'].includes(event.event) || p.fromMe || !['120363430180897172@g.us','120363412435389448@g.us'].includes(p.from) || !p.participant || !/^\\/\\S+/.test(p.body || '')) return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:p.body,requester:(p._data?.notifyName || p.pushName || 'Anggota WhatsApp').slice(0,60)}}];"
-      },
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
+      "id": "f5c02a6e-3657-4edc-8ea0-0fdc14ed1140",
+      "name": "Request Ruang Musik",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
       "position": [
         240,
         0
       ],
-      "id": "880935af-c56b-4de5-9ccd-a1e304bd3484",
-      "name": "Validasi grup dan peminta"
-    },
-    {
+      "retryOnFail": false,
+      "onError": "continueRegularOutput",
       "parameters": {
         "method": "POST",
         "url": "http://spotify-player:3210/api/integrations/whatsapp",
@@ -36,47 +46,76 @@
         "specifyBody": "json",
         "jsonBody": "={{ JSON.stringify($json) }}",
         "options": {
-          "timeout": 30000
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          }
         }
       },
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "TO_CONFIGURE",
+          "name": "Ruang Musik API · carubra"
+        }
+      }
+    },
+    {
+      "id": "88a29746-33cf-417d-812e-1ca7ed56fa94",
+      "name": "Siapkan balasan aplikasi",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
       "position": [
         480,
         0
       ],
-      "id": "9fb1aea1-58cf-49f3-8ea8-573e7938ac77",
-      "name": "Request Ruang Musik"
+      "parameters": {
+        "jsCode": "const c=$('Validasi grup dan peminta').first().json,r=$json,b=r.body??r;\nif(b.duplicate===true)return [];\nconst reply=typeof b.reply==='string'?b.reply:typeof b.error==='string'?b.error:r.statusCode===429?'Terlalu banyak command. Tunggu sebentar lalu periksa /queue.':'Server antrean belum dapat mengonfirmasi command. Periksa /queue sebelum mengirim request lagi.';\nreturn [{json:{chatId:c.groupId,messageId:c.messageId,reply}}];"
+      }
     },
     {
-      "parameters": {
-        "resource": "Chatting",
-        "operation": "Send Text",
-        "session": "carubra",
-        "chatId": "={{ $('Validasi grup dan peminta').item.json.groupId }}",
-        "reply_to": "={{ $('Validasi grup dan peminta').item.json.messageId }}",
-        "text": "={{ $json.reply }}",
-        "requestOptions": {}
-      },
-      "type": "@devlikeapro/n8n-nodes-waha.WAHA",
-      "typeVersion": 202502,
+      "id": "fdaa4d4c-7d03-4897-8b48-15b951d83145",
+      "name": "Reply WhatsApp",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "onError": "continueRegularOutput",
       "position": [
         720,
         0
       ],
-      "id": "05a9a9ee-ac42-475c-9216-708a85c2aad3",
-      "name": "Reply WhatsApp",
+      "parameters": {
+        "method": "POST",
+        "url": "https://waha.utero.id/api/sendText",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "wahaApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({session:'carubra',chatId:$json.chatId,text:$json.reply,reply_to:$json.messageId,linkPreview:false}) }}",
+        "options": {
+          "response": {
+            "response": {
+              "fullResponse": true,
+              "neverError": true
+            }
+          },
+          "timeout": 5000
+        }
+      },
       "credentials": {
         "wahaApi": {
           "id": "TmoxOMfuUUCgESYA",
           "name": "WAHA account"
         }
-      }
+      },
+      "retryOnFail": false
     }
   ],
   "connections": {
     "WAHA Trigger": {
       "main": [
+        [],
         [
           {
             "node": "Validasi grup dan peminta",
@@ -98,6 +137,17 @@
       ]
     },
     "Request Ruang Musik": {
+      "main": [
+        [
+          {
+            "node": "Siapkan balasan aplikasi",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Siapkan balasan aplikasi": {
       "main": [
         [
           {

@@ -10,11 +10,11 @@ function loadSDK() {
   }); return sdkPromise;
 }
 export class BrowserPlayer {
-  instance: any = null; timer: ReturnType<typeof setInterval> | null = null; deviceId = ''; claimed = false;
+  instance: any = null; timer: ReturnType<typeof setInterval> | null = null; deviceId = ''; claimed = false; startedDuringActivation = false;
   socket: () => WebSocket | null; connection: () => string; onError: (message: string) => void;
   constructor(socket: () => WebSocket | null, connection: () => string, onError: (message: string) => void) { this.socket = socket; this.connection = connection; this.onError = onError; }
   remember(playing?: boolean) { try { const previous = JSON.parse(sessionStorage.getItem('carubra-player') || '{}'); sessionStorage.setItem('carubra-player', JSON.stringify({ active: true, playing: playing ?? previous.playing ?? false })); } catch { /* Storage may be unavailable in private browsers. */ } }
-  async restore() { let saved: { active?: boolean; playing?: boolean }; try { saved = JSON.parse(sessionStorage.getItem('carubra-player') || '{}'); } catch { return; } if (!saved.active) return; await this.activate(); if (saved.playing) await api('/api/player/play', 'POST', {}); }
+  async restore() { let saved: { active?: boolean; playing?: boolean }; try { saved = JSON.parse(sessionStorage.getItem('carubra-player') || '{}'); } catch { return; } if (!saved.active) return; await this.activate(); if (saved.playing && !this.startedDuringActivation) { await api('/api/player/play', 'POST', {}); this.remember(true); } }
   send(data: unknown) { const socket = this.socket(); if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); }
   async activate(takeover = false) {
     if (!window.isSecureContext) throw new Error('Player memerlukan HTTPS. Buka https://spotify.carubra.com.');
@@ -31,11 +31,11 @@ export class BrowserPlayer {
       this.instance.activateElement();
       const connected = await this.instance.connect(); if (!connected) throw new Error('Browser tidak dapat terhubung ke Spotify.'); await ready;
     } else this.instance.activateElement();
-    await api('/api/player/claim', 'POST', { connectionId: this.connection(), deviceId: this.deviceId, takeover }); this.claimed = true; this.remember();
+    const claim = await api('/api/player/claim', 'POST', { connectionId: this.connection(), deviceId: this.deviceId, takeover }); this.startedDuringActivation = claim.started === true; this.claimed = true; this.remember();
     if (this.timer) clearInterval(this.timer); this.timer = setInterval(() => { void this.instance.getCurrentState().then((s: any) => this.telemetry(s)); }, 3000);
     const state = await this.instance.getCurrentState(); this.telemetry(state);
   }
-  telemetry(state: any) { if (!this.claimed || !state) return; this.remember(!state.paused); this.send({ type: 'telemetry', data: { uri: state.track_window?.current_track?.uri || '', paused: !!state.paused, positionMs: state.position || 0, durationMs: state.duration || 0 } }); }
+  telemetry(state: any) { if (!this.claimed) return; if (!state) { this.send({type:'telemetry',data:{uri:'',paused:true,positionMs:0,durationMs:0}}); return; } this.remember(!state.paused); this.send({ type: 'telemetry', data: { uri: state.track_window?.current_track?.uri || '', paused: !!state.paused, positionMs: state.position || 0, durationMs: state.duration || 0 } }); }
   async volume(volume: number) { try { if (!this.instance || !this.claimed) throw new Error('Player tidak aktif.'); await this.instance.setVolume(volume / 100); const actual = await this.instance.getVolume(); if (Math.abs(actual - volume / 100) > 0.08) throw new Error('Kontrol volume tidak didukung browser ini.'); this.send({ type: 'volume_result', ok: true }); } catch { this.send({ type: 'volume_result', ok: false }); this.onError('Browser menolak volume. Gunakan tombol volume Android.'); } }
   async wakeAudio() { if (this.instance) this.instance.activateElement(); }
   async release() { try { sessionStorage.removeItem('carubra-player'); } catch { /* Optional storage. */ } if (this.claimed && this.connection()) await api('/api/player/release', 'POST', { connectionId: this.connection() }); this.disconnect(); }

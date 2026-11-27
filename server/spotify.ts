@@ -43,15 +43,17 @@ export class Spotify {
   }
   async search(query: string): Promise<Track[]> { const data = await this.api('/search?type=track&limit=8&q=' + encodeURIComponent(query)); return (data.tracks?.items || []).filter(Boolean).map((t: any) => toTrack(t)); }
   async resolve(input: string): Promise<Track[]> {
-    const ref = spotifyReference(input);
+    let ref = spotifyReference(input);
+    if (!ref && /\bplaylist\b/i.test(input) && !/^(https?:|spotify:)/i.test(input.trim())) { const query = input.replace(/\b(?:playlist|putar|play|lagu|paling|booming)\b/gi, ' ').trim(); if (!query) throw new AppError('Sebutkan nama/tema playlist atau URL playlist.'); const results = await this.api('/search?type=playlist&limit=5&q=' + encodeURIComponent(query)); const playlist = results.playlists?.items?.find((p: any) => p?.uri); if (!playlist) throw new AppError('Playlist tidak ditemukan.'); ref = spotifyReference(playlist.uri); }
     if (!ref) { if (/^(?:https?:|spotify:)/i.test(input.trim())) throw new AppError('Gunakan URL track, album, atau playlist dari open.spotify.com.'); const tracks = await this.search(input); if (!tracks.length) throw new AppError('Lagu tidak ditemukan. Coba judul dan nama artis.'); return [tracks[0]]; }
     if (ref.type === 'track') { const t = await this.api(`/tracks/${ref.id}`); if (t.is_playable === false || t.is_local) throw new AppError('Lagu tidak tersedia untuk akun ini.'); return [toTrack(t)]; }
-    const container = await this.api(`/${ref.type}s/${ref.id}`);
+    let container: any;
+    try { container = await this.api(`/${ref.type}s/${ref.id}`); } catch (error) { if (ref.type === 'playlist' && error instanceof AppError) throw new AppError('Playlist tidak dapat dibaca melalui Spotify API. Antrean aplikasi memerlukan daftar track; tidak ada playback/antrean yang diubah. Gunakan URL track, album, atau playlist yang dapat diakses akun ini.', error.status); throw error; }
     const tracks: Track[] = []; let path: string | null = `/${ref.type}s/${ref.id}/${ref.type === 'playlist' ? 'items' : 'tracks'}?limit=50`;
     while (path && tracks.length < 200) {
       let page: any;
       try { page = await this.api(path); }
-      catch (error) { if (ref.type === 'playlist' && error instanceof AppError && error.status === 403) throw new AppError('Metadata playlist tersedia, tetapi Spotify menolak akses daftar lagunya (HTTP 403). Playlist ini tidak dapat ditambahkan sebagai antrean track. Untuk memutar langsung, gunakan /playlist ' + `https://open.spotify.com/playlist/${ref.id}` + ' di grup WhatsApp; command tersebut menggantikan playback aktif.', 403); throw error; }
+      catch (error) { if (ref.type === 'playlist' && error instanceof AppError && error.status === 403) throw new AppError('Metadata playlist tersedia, tetapi Spotify menolak akses daftar lagunya (HTTP 403). Playlist ini tidak dapat ditambahkan sebagai antrean track: ' + `https://open.spotify.com/playlist/${ref.id}` + '. Pada konsep antrean aplikasi, playlist harus bisa dibaca menjadi track. Gunakan URL track/album atau playlist yang dapat diakses akun ini.', 403); throw error; }
       for (const row of page.items || []) { const t = ref.type === 'playlist' ? row.item || row.track : row; if (t?.uri?.startsWith('spotify:track:') && !t.is_local && t.is_playable !== false) tracks.push(toTrack(t, ref.type === 'album' ? container : undefined)); }
       if (page.next) { const url = new URL(page.next); if (url.origin !== 'https://api.spotify.com' || !url.pathname.startsWith('/v1/')) throw new AppError('Pagination Spotify tidak valid.'); path = url.pathname.slice(3) + url.search; } else path = null;
     }

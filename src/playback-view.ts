@@ -10,10 +10,9 @@ export function playbackView(state: Snapshot | null) {
   const managed = state?.current && (connected || native?.current?.uri === state.current.uri) ? state.current : null;
   const externalCurrent = !managed && native?.current ? externalRequest(native.current, -1) : null;
   const current = managed || externalCurrent;
-  const nativeQueue = !managed || !connected ? (native?.queue || []).map(externalRequest) : [];
-  const synced = new Set(state?.syncedRequestIds || []);
-  const waitingRequests = connected ? [] : appQueue.filter(r => !synced.has(r.id));
-  const queue: DisplayRequest[] = [...nativeQueue, ...(connected ? appQueue : [])];
+  const nativeQueue: DisplayRequest[] = [];
+  const waitingRequests: PublicRequest[] = [];
+  const queue: DisplayRequest[] = appQueue;
   const useNativeProgress = current && native?.current?.uri === current.uri && (!connected || !!externalCurrent);
   const playback = state?.playback && useNativeProgress && native ? { ...state.playback, paused: native.paused, positionMs: native.positionMs, durationMs: native.durationMs, updatedAt: native.observedAt } : state?.playback;
   const hasPlayback = !!current && (connected || !!native?.deviceId);
