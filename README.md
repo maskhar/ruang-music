@@ -121,3 +121,8 @@ docker compose ps
 ```
 
 Deploy perintah ini tidak mengganti container/volume produksi. Jangan memakai volume produksi atau menjalankan `docker compose down -v`. Perubahan branch development baru masuk produksi melalui proses merge yang disengaja. Image ini tetap memakai build production untuk hasil uji yang konsisten; kode baru tersedia setelah build ulang.
+
+Domain development: `https://dev-spotify.carubra.com`.
+Spotify callback: `https://dev-spotify.carubra.com/auth/spotify/callback`.
+Tambahkan Published application route pada Cloudflare Tunnel carubra untuk hostname `dev-spotify.carubra.com` dengan service HTTP `http://dev-spotify-player:3210`.
+Container development terhubung ke `carubra-network` untuk ingress tunnel; volume/database tetap terpisah. Port localhost 3211 tetap tersedia untuk health check. Login/operator memakai domain HTTPS karena cookie Secure mengikuti APP_ORIGIN.
