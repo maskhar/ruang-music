@@ -3,7 +3,7 @@ import { Store } from './database.ts';
 import type { SongRequest } from './types.ts';
 export class Notifications {
   store: Store; config: Config; busy = false;
-  constructor(store: Store, config: Config) { this.store = store; this.config = config; }
+  constructor(store: Store, config: Config, private allowsGroup = (id: string) => config.groupIds.includes(id)) { this.store = store; this.config = config; }
   async dispatch() {
     if (this.busy || !this.config.wahaKey || !this.config.wahaUrl) return;
     this.busy = true;
@@ -11,7 +11,7 @@ export class Notifications {
       const row = this.store.db.prepare("SELECT id,data FROM outbox WHERE status='pending' ORDER BY created_at LIMIT 1").get() as { id: string; data: string } | undefined;
       if (!row) return;
       const request = JSON.parse(row.data) as SongRequest;
-      if (!this.config.groupIds.includes(request.groupId) || !/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/.test(request.senderId)) { this.store.db.prepare("UPDATE outbox SET status='failed',error='Identitas pengirim/grup tidak valid.' WHERE id=?").run(row.id); return; }
+      if (!this.allowsGroup(request.groupId) || !/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/.test(request.senderId)) { this.store.db.prepare("UPDATE outbox SET status='failed',error='Identitas pengirim/grup tidak valid.' WHERE id=?").run(row.id); return; }
       const claim = this.store.db.prepare("UPDATE outbox SET status='sending' WHERE id=? AND status='pending'").run(row.id);
       if (!claim.changes) return;
       try {

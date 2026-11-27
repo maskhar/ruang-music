@@ -14,63 +14,334 @@ import { whatsappCommand } from './whatsapp.ts';
 import { Queue } from './queue.ts';
 import { SpotifyObserver } from './spotify-observer.ts';
 import { Notifications } from './notifications.ts';
-import { equal, hash, passwordMatches, secret } from './crypto.ts';
+import { Identity, type Role } from './identity.ts';
+import { equal, hash, secret } from './crypto.ts';
 import { AppError, type SongRequest } from './types.ts';
 import type { Config } from './config.ts';
 export function createApp(config: Config, provided?: Store) {
-  const store = provided || new Store(join(config.dataDir, 'player.sqlite')), spotify = new Spotify(config, store), queue = new Queue(store, spotify), notifications = new Notifications(store, config);
+  const store = provided || new Store(join(config.dataDir, 'player.sqlite')), spotify = new Spotify(config, store), queue = new Queue(store, spotify);
+  const identity = new Identity(provided ? ':memory:' : join(config.dataDir, 'identity.sqlite'), config.password, config.groupIds, config.wahaSession);
+  const allowedGroup = (groupId: string) => groupId !== '0@g.us' && config.groupIds.includes(groupId);
+  const notificationsFor = (roomId: string, roomStore: Store) => new Notifications(roomStore, config, groupId =>
+    allowedGroup(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
+  const notifications = notificationsFor('default', store);
+  type Runtime = { id: string; name: string; store: Store; spotify: Spotify; queue: Queue; notifications: Notifications; observer: SpotifyObserver; integrationSerial?: Promise<void> };
+  const runtimes = new Map<string, Runtime>();
+  const initial: Runtime = { id: 'default', name: 'Ruang utama', store, spotify, queue, notifications, observer: new SpotifyObserver(spotify) };
+  runtimes.set('default', initial);
+  const runtime = (id: string): Runtime => {
+    let value = runtimes.get(id);
+    if (!value) {
+      const room = identity.db.prepare('SELECT name FROM rooms WHERE id=?').get(id) as {name:string}|undefined;
+      if (!room) throw new AppError('Ruang tidak ditemukan.',404);
+      const roomStore = new Store(provided ? ':memory:' : join(config.dataDir, 'rooms', id + '.sqlite'));
+      const roomSpotify = new Spotify(config, roomStore), roomQueue = new Queue(roomStore, roomSpotify);
+      value = { id, name:room.name, store: roomStore, spotify: roomSpotify, queue: roomQueue, observer: new SpotifyObserver(roomSpotify), notifications: notificationsFor(id, roomStore) };
+      runtimes.set(id, value);
+      value.queue.on('change', () => broadcast(value!));
+      value.observer.on('change', () => { void value!.queue.reconcile(value!.observer.state).then(() => broadcast(value!)).catch(() => {}); });
+    }
+    return value;
+  };
   const app = express(), server = createServer(app), wss = new WebSocketServer({ noServer: true, maxPayload: 8192 });
-  const observer = new SpotifyObserver(spotify);
-  const clients = new Map<string, { socket: WebSocket; session: string }>();
+  const observer = initial.observer;
+  const clients = new Map<string, { socket: WebSocket; token: string; roomId: string }>();
+  const controllers: Role[] = ['owner','operator'];
   app.disable('x-powered-by'); app.set('trust proxy', config.trustProxy);
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://sdk.scdn.co'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://i.scdn.co', 'https://mosaic.scdn.co', 'https://image-cdn-ak.spotifycdn.com', 'https://image-cdn-fa.spotifycdn.com'], connectSrc: ["'self'", 'https://*.spotify.com', 'https://*.scdn.co', 'wss://*.spotify.com'], frameSrc: ['https://sdk.scdn.co', 'https://*.spotify.com'], mediaSrc: ["'self'", 'blob:', 'https://*.scdn.co', 'https://*.spotifycdn.com'], upgradeInsecureRequests: config.cookieSecure ? [] : null } }, crossOriginEmbedderPolicy: false, crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }, strictTransportSecurity: config.cookieSecure ? undefined : false }));
   app.use(express.json({ limit: '16kb' }), cookieParser());
-  app.get('/healthz', (_req, res) => res.json({ ok: true, queueMode: 'application' }));
-  const sessionValid = (token: string) => { const row = store.db.prepare('SELECT expires FROM sessions WHERE hash=?').get(hash(token)) as { expires: number } | undefined; return !!row && row.expires > Date.now(); };
-  const auth: express.RequestHandler = (req, res, next) => { if (!sessionValid(req.cookies.carubra_session || '')) { res.status(401).json({ error: 'Masuk sebagai operator terlebih dahulu.' }); return; } res.set('Cache-Control', 'no-store'); next(); };
+  app.get('/healthz', (_req, res) => res.json({ ok: true, queueMode: 'application', rooms: true }));
+  const userFor = (req: express.Request) => { const user = identity.session(req.cookies?.carubra_session || ''); if (!user) throw new AppError('Masuk terlebih dahulu.', 401); return user; };
+  const roomFor = (req: express.Request, roles?: Role[]) => { const user = userFor(req), roomId = req.get('x-room-id') || 'default'; identity.require(user,roomId,roles); return runtime(roomId); };
+  const auth: express.RequestHandler = (req, res, next) => { try { userFor(req); res.set('Cache-Control', 'no-store'); next(); } catch { res.status(401).json({ error: 'Masuk terlebih dahulu.' }); } };
   const sameOrigin: express.RequestHandler = (req, res, next) => { const origin = req.get('origin'); if (origin !== config.origin && !(process.env.NODE_ENV !== 'production' && origin === 'http://127.0.0.1:5173')) { res.status(403).json({ error: 'Origin tidak diizinkan.' }); return; } next(); };
   app.use('/api', (req, res, next) => { res.set('Cache-Control', 'no-store'); if (!['GET', 'HEAD', 'OPTIONS'].includes(req.method) && !req.path.startsWith('/integrations/')) return sameOrigin(req, res, next); next(); });
-  app.get('/api/session', (req, res) => res.json({ authenticated: sessionValid(req.cookies.carubra_session || ''), appName: 'Ruang Musik', origin: config.origin }));
+  app.get('/api/session', (req, res) => { const user = identity.session(req.cookies.carubra_session || ''); res.json({ authenticated: !!user, user, rooms: user ? identity.rooms(user) : [], appName: 'Ruang Musik', origin: config.origin }); });
   const loginLimit = rateLimit({ windowMs: 15 * 60000, limit: 12, standardHeaders: 'draft-8', legacyHeaders: false, message: { error: 'Terlalu banyak percobaan login. Tunggu 15 menit.' } });
-  app.post('/api/login', loginLimit, (req, res) => { const password = z.string().max(256).parse(req.body.password); if (!passwordMatches(password, config.password)) { res.status(401).json({ error: 'Password operator salah.' }); return; } const token = secret(); store.db.prepare('INSERT INTO sessions(hash,expires) VALUES(?,?)').run(hash(token), Date.now() + 7 * 86400000); res.cookie('carubra_session', token, { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, maxAge: 7 * 86400000, path: '/' }).json({ ok: true }); });
-  app.post('/api/logout', auth, (req, res) => { const session = hash(req.cookies.carubra_session); store.db.prepare('DELETE FROM sessions WHERE hash=?').run(session); for (const [id, client] of clients) if (client.session === session) { queue.release(id); client.socket.close(1008, 'Signed out'); clients.delete(id); } res.clearCookie('carubra_session', { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, path: '/' }).json({ ok: true }); });
+  app.post('/api/login', loginLimit, (req, res) => {
+    const body = z.object({ email: z.string().email().or(z.literal('owner@local')).optional(), password: z.string().max(256) }).parse(req.body);
+    const login = identity.login(body.email || 'owner@local', body.password);
+    res.cookie('carubra_session', login.token, { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, maxAge: 7 * 86400000, path: '/' }).json({ ok: true, user: login.user });
+  });
+  app.post('/api/logout', auth, (req, res) => {
+    const token = req.cookies.carubra_session;
+    identity.logout(token);
+    for (const [id, client] of clients) if (client.token === token) {
+      runtime(client.roomId).queue.release(id);
+      client.socket.close(1008, 'Signed out');
+    }
+    res.clearCookie('carubra_session', { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, path: '/' }).json({ ok: true });
+  });
+  app.get('/api/rooms', auth, (req, res) => res.json({ rooms: identity.rooms(userFor(req)) }));
+  app.post('/api/rooms', auth, (req, res) => { const name = z.string().trim().min(2).max(80).regex(/^[^\r\n]+$/).parse(req.body.name); const id = identity.createRoom(userFor(req),name); res.status(201).json({id,name}); });
+  app.get('/api/rooms/:id/members', auth, (req,res) => {
+    res.json({members:identity.members(userFor(req),String(req.params.id))});
+  });
+  app.post('/api/rooms/:id/members', auth, (req,res) => {
+    const body = z.object({ email:z.string().trim().email().max(254), name:z.string().trim().min(1).max(60), role:z.enum(['operator','member']) }).parse(req.body);
+    const token = identity.invite(userFor(req),String(req.params.id),body.email.toLowerCase(),body.name,body.role);
+    res.status(201).json({ inviteUrl: token ? config.origin + '/?invite=' + token : null });
+  });
+  app.post('/api/invitations/accept', loginLimit, (req,res) => {
+    const body = z.object({token:z.string().regex(/^[a-zA-Z0-9_-]{43}$/),password:z.string().min(12).max(256)}).parse(req.body);
+    const email = identity.accept(body.token, body.password);
+    res.json({ok:true,email});
+  });
+  app.delete('/api/rooms/:id/members/:userId', auth, (req,res) => {
+    const roomId = String(req.params.id), userId = String(req.params.userId);
+    identity.removeMember(userFor(req),roomId,userId);
+    for (const [id,client] of clients) {
+      if (client.roomId !== roomId || identity.session(client.token)?.id !== userId) continue;
+      runtime(roomId).queue.release(id);
+      client.socket.close(1008,'Akses ruang berakhir');
+    }
+    res.json({ok:true});
+  });
+  app.post('/api/rooms/:id/groups', auth, (req,res) => {
+    const actor = userFor(req), roomId = String(req.params.id);
+    identity.require(actor,roomId,['owner']);
+    const body = z.object({groupId:z.string().regex(/^[0-9]+@g\.us$/),session:z.string().default(config.wahaSession)}).parse(req.body);
+    if (!allowedGroup(body.groupId) || body.session !== config.wahaSession) throw new AppError('Grup tidak terdaftar untuk lingkungan ini.',403);
+    const code = identity.beginPairing(actor,roomId,body.groupId,body.session);
+    res.status(201).json({code});
+  });
+  app.delete('/api/rooms/:id/groups/:groupId', auth, (req,res) => {
+    identity.unbindGroup(userFor(req),String(req.params.id),String(req.params.groupId));
+    res.json({ok:true});
+  });
   const publicRequest = (r: SongRequest | null) => { if (!r) return null; const { senderId: _sender, messageId: _message, groupId: _group, ...publicData } = r; return publicData; };
-  const snapshot = () => ({ current: publicRequest(queue.current()), queue: store.list('queued', 500).map(publicRequest), history: store.list(undefined, 20).map(publicRequest), playback: queue.playback, spotifyPlayback: observer.state, notificationsFailed: Number((store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!config.wahaKey, callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
-  const broadcast = () => { const message = JSON.stringify({ type: 'snapshot', data: snapshot() }); for (const client of clients.values()) if (client.socket.readyState === WebSocket.OPEN) client.socket.send(message); };
-  queue.on('change', broadcast);
-  observer.on('change', () => { void queue.reconcile(observer.state).then(broadcast).catch(() => {}); });
-  app.get('/api/state', auth, async (_req, res) => { await observer.refresh(); res.json(snapshot()); });
-  app.get('/auth/spotify', auth, (req, res) => { if (!config.clientId) throw new AppError('SPOTIFY_CLIENT_ID belum diisi di .env.', 409); const state = secret(), verifier = secret(); store.db.prepare('DELETE FROM oauth WHERE expires<?').run(Date.now()); store.db.prepare('INSERT INTO oauth(state,session_hash,verifier,expires) VALUES(?,?,?,?)').run(state, hash(req.cookies.carubra_session), verifier, Date.now() + 600000); const params = new URLSearchParams({ client_id: config.clientId, response_type: 'code', redirect_uri: config.origin + '/auth/spotify/callback', code_challenge_method: 'S256', code_challenge: spotify.challenge(verifier), state, scope: scopes }); res.redirect('https://accounts.spotify.com/authorize?' + params); });
-  app.get('/auth/spotify/callback', auth, async (req, res) => { const state = String(req.query.state || ''), row = store.db.prepare('SELECT * FROM oauth WHERE state=?').get(state) as { verifier: string; session_hash: string; expires: number } | undefined; if (!row || row.expires < Date.now() || row.session_hash !== hash(req.cookies.carubra_session)) throw new AppError('Sesi login Spotify tidak valid/kedaluwarsa. Ulangi Hubungkan Spotify.'); store.db.prepare('DELETE FROM oauth WHERE state=?').run(state); if (req.query.error) { res.redirect('/?spotify=denied'); return; } await spotify.exchange(z.string().min(1).parse(req.query.code), row.verifier); const me = await spotify.api('/me'); if (me.product !== 'premium') { store.set('spotifyTokens', null); throw new AppError('Web Playback SDK memerlukan akun Spotify Premium.', 403); } store.set('spotifyAccount', { displayName: me.display_name || 'Spotify', product: me.product }); broadcast(); res.redirect('/?spotify=connected'); });
-  app.get('/api/spotify/token', auth, async (_req, res) => res.json({ accessToken: await spotify.token() }));
-  app.get('/api/search', auth, async (req, res) => res.json({ tracks: await spotify.search(z.string().trim().min(2).max(200).parse(req.query.q)) }));
-  app.post('/api/requests', auth, async (req, res) => { const body = z.object({ input: z.string().trim().min(1).max(500), requester: z.string().trim().min(1).max(60).default('Operator') }).parse(req.body); const added = await queue.enqueue(await spotify.resolve(body.input), { requester: body.requester, source: 'web' }); res.status(201).json({ added: added.length }); });
-  app.delete('/api/requests/:id', auth, async (req, res) => { await queue.remove(String(req.params.id)); res.json({ ok: true }); });
-  app.post('/api/queue/clear', auth, async (_req, res) => { const cleared = await queue.clear(); res.json({ cleared }); });
-  app.post('/api/player/claim', auth, async (req, res) => { const body = z.object({ connectionId: z.string().uuid(), deviceId: z.string().min(1).max(200), takeover: z.boolean().default(false) }).parse(req.body); if (clients.get(body.connectionId)?.session !== hash(req.cookies.carubra_session)) throw new AppError('Koneksi player tidak cocok. Muat ulang halaman.', 409); const before = queue.current()?.id; await queue.claim(body.connectionId, body.deviceId, body.takeover); res.json({ ok: true, started: !before && !!queue.current() }); });
-  app.post('/api/player/release', auth, async (req, res) => { const id = z.string().uuid().parse(req.body.connectionId); if (clients.get(id)?.session !== hash(req.cookies.carubra_session)) throw new AppError('Koneksi tidak cocok.', 403); if (queue.lease?.connectionId === id) await queue.pause(); queue.release(id); res.json({ ok: true }); });
-  for (const [action, fn] of Object.entries({ play: () => queue.resume(), pause: () => queue.pause(), next: () => queue.next(), stop: () => queue.stop() })) app.post('/api/player/' + action, auth, async (_req, res) => { await fn(); res.json({ ok: true }); });
-  const changeVolume = (value: number) => { if (!queue.lease) throw new AppError('Aktifkan player terlebih dahulu.', 409); const owner = clients.get(queue.lease.connectionId); if (!owner) throw new AppError('Player terputus.', 409); owner.socket.send(JSON.stringify({ type: 'volume', volume: value })); queue.playback.volume = value; queue.playback.volumeUpdatedAt = Date.now(); queue.changed(); };
-  app.post('/api/player/volume', auth, (req, res) => { changeVolume(z.number().int().min(0).max(100).parse(req.body.volume)); res.json({ ok: true }); });
-  let integrationSerial: Promise<unknown> = Promise.resolve();
-  app.post('/api/integrations/whatsapp', rateLimit({ windowMs: 60000, limit: 40, legacyHeaders: false }), async (req, res) => {
+  const snapshot = (rt: Runtime) => ({ roomId:rt.id, current: publicRequest(rt.queue.current()), queue: rt.store.list('queued', 500).map(publicRequest), history: rt.store.list(undefined, 20).map(publicRequest), playback: rt.queue.playback, spotifyPlayback: rt.observer.state, notificationsFailed: Number((rt.store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: rt.spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!config.wahaKey, callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
+  const broadcast = (rt: Runtime) => {
+    const roomClients = [...clients.values()].filter(client => client.roomId === rt.id &&
+      client.socket.readyState === WebSocket.OPEN && validClient(client.token,rt.id));
+    if (!roomClients.length) return;
+    const message = JSON.stringify({type:'snapshot',data:snapshot(rt)});
+    for (const client of roomClients) client.socket.send(message);
+  };
+  queue.on('change', () => broadcast(initial));
+  observer.on('change', () => { void queue.reconcile(observer.state).then(() => broadcast(initial)).catch(() => {}); });
+  app.get('/api/state', auth, async (req, res) => { const rt=roomFor(req); await rt.observer.refresh(); res.json(snapshot(rt)); });
+  app.get('/auth/spotify', auth, (req, res) => {
+    const roomId = z.string().uuid().or(z.literal('default')).parse(req.query.room || 'default');
+    identity.require(userFor(req),roomId,['owner']);
+    const rt = runtime(roomId);
+    if (!config.clientId) throw new AppError('Spotify belum dikonfigurasi.',409);
+    const state = roomId + '.' + secret(), verifier = secret();
+    rt.store.db.prepare('DELETE FROM oauth WHERE expires<?').run(Date.now());
+    rt.store.db.prepare('INSERT INTO oauth(state,session_hash,verifier,expires) VALUES(?,?,?,?)')
+      .run(state,hash(req.cookies.carubra_session),verifier,Date.now() + 600000);
+    const params = new URLSearchParams({
+      client_id:config.clientId,response_type:'code',redirect_uri:config.origin + '/auth/spotify/callback',
+      code_challenge_method:'S256',code_challenge:rt.spotify.challenge(verifier),state,scope:scopes,
+      // Each room can select a different Spotify account in the same browser.
+      show_dialog:'true'
+    });
+    res.redirect('https://accounts.spotify.com/authorize?' + params);
+  });
+  app.get('/auth/spotify/callback', auth, async (req, res) => {
+    const state = z.string().max(90).parse(req.query.state);
+    const roomId = z.string().uuid().or(z.literal('default')).parse(state.split('.')[0]);
+    identity.require(userFor(req),roomId,['owner']);
+    const rt = runtime(roomId);
+    const row = rt.store.db.prepare('SELECT verifier FROM oauth WHERE state=? AND session_hash=? AND expires>?')
+      .get(state,hash(req.cookies.carubra_session),Date.now()) as {verifier:string}|undefined;
+    if (!row) throw new AppError('Sesi login Spotify kedaluwarsa. Ulangi Hubungkan Spotify.');
+    rt.store.db.prepare('DELETE FROM oauth WHERE state=?').run(state);
+    if (req.query.error) { res.redirect('/?room=' + roomId + '&spotify=denied'); return; }
+    const {profile,encryptedTokens} = await rt.spotify.exchange(z.string().min(1).max(2048).parse(req.query.code),row.verifier);
+    if (profile.product !== 'premium') throw new AppError('Akun Spotify Premium diperlukan.',403);
+    if (roomId !== 'default' && spotify.connected && !identity.spotifyId('default')) {
+      let legacyProfile;
+      try { legacyProfile = await spotify.api('/me'); } catch {
+        throw new AppError('Hubungkan ulang Spotify di Ruang utama sebelum menambah akun lain.',409);
+      }
+      if (typeof legacyProfile?.id !== 'string' || !legacyProfile.id) throw new AppError('Identitas Spotify Ruang utama belum tersedia.',409);
+      if (!identity.spotifyId('default')) identity.bindSpotify('default',legacyProfile.id);
+    }
+    identity.require(userFor(req),roomId,['owner']);
+    await rt.queue.run(async () => {
+      identity.require(userFor(req),roomId,['owner']);
+      if (rt.queue.lease && identity.spotifyId(roomId) !== profile.id) throw new AppError('Lepaskan player ruang sebelum mengganti akun Spotify.',409);
+      rt.store.transaction(() => {
+        rt.store.set('spotifyTokens',encryptedTokens);
+        rt.store.set('spotifyAccount',{id:profile.id,displayName:profile.display_name || 'Spotify',product:profile.product});
+        identity.bindSpotify(roomId,profile.id);
+      });
+    });
+    broadcast(rt);
+    res.redirect('/?room=' + roomId + '&spotify=connected');
+  });
+  app.get('/api/spotify/token', auth, async (req, res) => res.json({ accessToken: await roomFor(req,['owner','operator']).spotify.token() }));
+  app.get('/api/search', auth, async (req, res) => res.json({ tracks: await roomFor(req).spotify.search(z.string().trim().min(2).max(200).parse(req.query.q)) }));
+  app.post('/api/requests', auth, async (req, res) => { const rt=roomFor(req), user=userFor(req); const input=z.string().trim().min(1).max(500).parse(req.body.input); const added = await rt.queue.enqueue(await rt.spotify.resolve(input), { requester:user.name, source:'web' }); res.status(201).json({added:added.length}); });
+  app.delete('/api/requests/:id', auth, async (req, res) => { await roomFor(req,['owner','operator']).queue.remove(String(req.params.id)); res.json({ ok: true }); });
+  app.post('/api/queue/clear', auth, async (req, res) => { const cleared = await roomFor(req,['owner','operator']).queue.clear(); res.json({ cleared }); });
+  const ownsConnection = (req: express.Request, room: Runtime, id: string) => {
+    const client = clients.get(id);
+    return client?.roomId === room.id && client.token === req.cookies.carubra_session && client.socket.readyState === WebSocket.OPEN;
+  };
+  app.post('/api/player/claim', auth, async (req, res) => {
+    const rt = roomFor(req,controllers);
+    const body = z.object({ connectionId:z.string().uuid(), deviceId:z.string().min(1).max(200), takeover:z.boolean().default(false) }).parse(req.body);
+    if (!ownsConnection(req,rt,body.connectionId)) throw new AppError('Koneksi player tidak cocok dengan ruang ini.',409);
+    const previous = rt.queue.lease?.connectionId, before = rt.queue.current()?.id;
+    await rt.queue.claim(body.connectionId,body.deviceId,body.takeover);
+    if (!ownsConnection(req,rt,body.connectionId) || !controllers.includes(validClient(req.cookies.carubra_session,rt.id) || 'member')) {
+      rt.queue.release(body.connectionId);
+      throw new AppError('Koneksi player sudah berakhir.',409);
+    }
+    const previousSocket = previous && previous !== body.connectionId ? clients.get(previous)?.socket : undefined;
+    if (previousSocket?.readyState === WebSocket.OPEN) previousSocket.send(JSON.stringify({type:'player_released'}));
+    res.json({ok:true, started:!before && !!rt.queue.current()});
+  });
+  app.post('/api/player/release', auth, async (req, res) => {
+    const rt = roomFor(req,controllers), id = z.string().uuid().parse(req.body.connectionId);
+    if (!ownsConnection(req,rt,id)) throw new AppError('Koneksi tidak cocok dengan ruang ini.',403);
+    if (rt.queue.lease?.connectionId === id) await rt.queue.pause();
+    rt.queue.release(id);
+    res.json({ok:true});
+  });
+  const playerActions = {play:'resume',pause:'pause',next:'next',stop:'stop'} as const;
+  for (const [action, method] of Object.entries(playerActions)) app.post('/api/player/' + action, auth, async (req, res) => {
+    await roomFor(req,controllers).queue[method]();
+    res.json({ok:true});
+  });
+  const changeVolume = (rt: Runtime, value: number) => {
+    const {queue} = rt;
+    if (!queue.lease) throw new AppError('Aktifkan player terlebih dahulu.',409);
+    const owner = clients.get(queue.lease.connectionId);
+    if (!owner || owner.roomId !== rt.id || owner.socket.readyState !== WebSocket.OPEN) throw new AppError('Player terputus.',409);
+    owner.socket.send(JSON.stringify({type:'volume', volume:value}));
+    queue.playback.volume = value;
+    queue.playback.volumeUpdatedAt = Date.now();
+    queue.changed();
+  };
+  app.post('/api/player/volume', auth, (req, res) => {
+    changeVolume(roomFor(req,controllers), z.number().int().min(0).max(100).parse(req.body.volume));
+    res.json({ok:true});
+  });
+  const whatsappPayload = z.object({
+    groupId:z.string(),session:z.string().max(100).default(config.wahaSession),
+    senderId:z.string().regex(/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/),messageId:z.string().min(1).max(250),
+    text:z.string().trim().min(1).max(1000),requester:z.string().trim().max(60).default('Anggota WhatsApp')
+  });
+  const verifyWhatsapp: express.RequestHandler = (req,res,next) => {
     if (!config.integrationToken || !equal(req.get('authorization') || '', 'Bearer ' + config.integrationToken)) throw new AppError('Integration token tidak valid.', 401);
-    const body = z.object({ groupId: z.string(), senderId: z.string().regex(/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/), messageId: z.string().min(1).max(250), text: z.string().trim().min(1).max(1000), requester: z.string().trim().max(60).default('Anggota WhatsApp') }).parse(req.body);
-    if (!config.groupIds.includes(body.groupId)) throw new AppError('Grup tidak diizinkan.', 403);
+    const body = whatsappPayload.parse(req.body);
+    if (!allowedGroup(body.groupId) || body.session !== config.wahaSession) throw new AppError('Grup atau session tidak diizinkan.',403);
+    res.locals.whatsapp = body;
+    next();
+  };
+  app.post('/api/integrations/whatsapp', verifyWhatsapp, rateLimit({windowMs:60000,limit:40,legacyHeaders:false}), async (_req,res) => {
+    const body = res.locals.whatsapp as z.output<typeof whatsappPayload>;
     const receiptId = body.groupId + ':' + body.messageId;
-    const previousIntegration = integrationSerial; let finishIntegration!: () => void; integrationSerial = new Promise<void>(resolve => { finishIntegration = resolve; }); await previousIntegration;
+    const pairing = body.text.match(/^\/hubungkan(?:\s+(\S+))?$/i);
+    if (pairing) {
+      const reply = identity.pairingReply(body.groupId,body.session,pairing[1] || '',receiptId);
+      res.json(reply);
+      return;
+    }
+    const legacyReceipt = store.db.prepare('SELECT reply FROM receipts WHERE id=?').get(receiptId) as {reply:string}|undefined;
+    if (legacyReceipt) { res.json({reply:legacyReceipt.reply,duplicate:true}); return; }
+    const roomId = identity.roomForGroup(body.groupId,body.session);
+    if (!roomId) throw new AppError('Grup belum terhubung ke ruang.',403);
+    const rt = runtime(roomId);
+    const previousIntegration = rt.integrationSerial;
+    let finishIntegration!: () => void;
+    rt.integrationSerial = new Promise<void>(resolve => { finishIntegration = resolve; });
     try {
-    const prior = store.db.prepare('SELECT reply FROM receipts WHERE id=?').get(receiptId) as { reply: string } | undefined; if (prior) { res.json({ reply: prior.reply, duplicate: true }); return; }
-    store.db.prepare('INSERT INTO receipts(id,reply,created_at) VALUES(?,?,?)').run(receiptId, 'Request ini sudah diterima. Jika respons terputus, periksa /queue sebelum mengirim request baru.', Date.now());
-    const reply = await whatsappCommand(body.text, { requester: body.requester || 'Anggota WhatsApp', source: 'whatsapp', senderId: body.senderId, groupId: body.groupId, messageId: body.messageId }, { queue, spotify, store, origin: config.origin, volume: changeVolume });
-    store.db.prepare('UPDATE receipts SET reply=? WHERE id=?').run(reply, receiptId); res.json({ reply });
-    } catch (error) { const reply = error instanceof AppError ? error.message : 'Command belum selesai. Periksa /queue sebelum mencoba lagi.'; store.db.prepare('UPDATE receipts SET reply=? WHERE id=?').run(reply, receiptId); if (error instanceof AppError) { res.json({ reply, commandFailed: true }); return; } throw error; } finally { finishIntegration(); }
+      await previousIntegration;
+      if (identity.roomForGroup(body.groupId,body.session) !== roomId) throw new AppError('Grup berpindah ruang. Kirim ulang command.',403);
+      const receipt = identity.beginCommand(receiptId);
+      if (receipt) { res.json({reply:receipt,duplicate:true}); return; }
+      try {
+        const reply = await whatsappCommand(body.text, {requester:body.requester || 'Anggota WhatsApp',source:'whatsapp',senderId:body.senderId,groupId:body.groupId,messageId:body.messageId},
+          {queue:rt.queue,spotify:rt.spotify,store:rt.store,roomName:rt.name,roomUrl:config.origin+'/?room='+rt.id,volume:value=>changeVolume(rt,value)});
+        identity.saveReply(receiptId,reply);
+        res.json({reply});
+      } catch (error) {
+        const reply = error instanceof AppError ? error.message : 'Command belum selesai. Periksa /queue sebelum mencoba lagi.';
+        identity.saveReply(receiptId,reply);
+        if (!(error instanceof AppError)) throw error;
+        res.json({reply,commandFailed:true});
+      }
+    } finally { finishIntegration(); }
   });
   const web = resolve('dist'); if (existsSync(web)) { app.use(express.static(web, { maxAge: '1h', index: false })); app.get('/{*path}', (req, res, next) => { if (req.path.startsWith('/api/') || req.path.startsWith('/auth/')) return next(); res.set('Cache-Control', 'no-cache').sendFile(join(web, 'index.html')); }); }
   app.use((_req, res) => res.status(404).json({ error: 'Endpoint tidak ditemukan.' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => { const status = error instanceof AppError ? error.status : error instanceof z.ZodError ? 400 : 500; res.status(status).json({ error: error instanceof z.ZodError ? 'Data input tidak valid.' : status === 500 ? 'Terjadi kesalahan server. Coba lagi.' : (error as Error).message }); if (status === 500) console.error('Server error:', (error as Error).name); });
-  server.on('upgrade', (req, socket, head) => { const origin = req.headers.origin; const token = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith('carubra_session='))?.slice(16) || ''; if (req.url !== '/ws' || !sessionValid(token) || (origin !== config.origin && !(process.env.NODE_ENV !== 'production' && origin === 'http://127.0.0.1:5173'))) { socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n'); socket.destroy(); return; } wss.handleUpgrade(req, socket, head, ws => wss.emit('connection', ws, hash(token))); });
-  wss.on('connection', (socket: WebSocket, session: string) => { const id = randomUUID(); clients.set(id, { socket, session }); void observer.refresh(); socket.send(JSON.stringify({ type: 'hello', connectionId: id })); socket.send(JSON.stringify({ type: 'snapshot', data: snapshot() })); socket.on('close', () => { clients.delete(id); queue.release(id); }); socket.on('message', data => { try { const msg = JSON.parse(data.toString()); if (msg.type === 'telemetry') { const state = z.object({ uri: z.string().max(200), paused: z.boolean(), positionMs: z.number().min(0).max(86400000), durationMs: z.number().min(0).max(86400000) }).parse(msg.data); void queue.telemetry(id, state).catch(e => queue.error(id, (e as Error).message)); } else if (msg.type === 'player_error') queue.error(id, String(msg.message || 'Player error'), msg.needsGesture === true); else if (msg.type === 'volume_result' && msg.ok === false) queue.error(id, 'Browser menolak kontrol volume. Gunakan tombol volume perangkat Android.'); } catch { socket.close(1008, 'Invalid message'); } }); });
-  const timer = setInterval(() => { queue.tick(); if (clients.size || queue.current()) void observer.refresh(); void notifications.dispatch().then(broadcast).catch(() => {}); for (const [id, c] of clients) { const valid = store.db.prepare('SELECT expires FROM sessions WHERE hash=?').get(c.session) as { expires: number } | undefined; if (!valid || valid.expires < Date.now()) { c.socket.close(1008, 'Session expired'); queue.release(id); } else c.socket.ping(); } }, 5000); timer.unref();
-  return { app, server, store, spotify, queue, notifications, observer, close: () => { observer.stop(); clearInterval(timer); for (const c of clients.values()) c.socket.close(); wss.close(); server.close(); store.close(); } };
+  const validClient = (token: string, roomId: string) => {
+    const user = identity.session(token);
+    return user ? identity.role(user,roomId) : null;
+  };
+  const connectRoom = (socket: WebSocket, token: string, rt: Runtime) => {
+    const id = randomUUID();
+    clients.set(id,{socket,token,roomId:rt.id});
+    void rt.observer.refresh();
+    socket.send(JSON.stringify({type:'hello',connectionId:id}));
+    socket.send(JSON.stringify({type:'snapshot',data:snapshot(rt)}));
+    socket.on('error', () => socket.terminate());
+    socket.on('close', () => { clients.delete(id); rt.queue.release(id); });
+    socket.on('message', data => {
+      try {
+        const role = validClient(token,rt.id);
+        if (!role) { socket.close(1008,'Akses ruang berakhir'); return; }
+        if (!controllers.includes(role) || rt.queue.lease?.connectionId !== id) return;
+        const msg = JSON.parse(data.toString());
+        if (msg.type === 'telemetry') {
+          const state = z.object({uri:z.string().max(200),paused:z.boolean(),positionMs:z.number().min(0).max(86400000),durationMs:z.number().min(0).max(86400000)}).parse(msg.data);
+          void rt.queue.telemetry(id,state).catch(error => rt.queue.error(id,error.message));
+        } else if (msg.type === 'player_error') {
+          rt.queue.error(id,String(msg.message || 'Player error'),msg.needsGesture === true);
+        } else if (msg.type === 'volume_result' && msg.ok === false) {
+          rt.queue.error(id,'Browser menolak kontrol volume. Gunakan tombol volume perangkat Android.');
+        }
+      } catch { socket.close(1008,'Invalid message'); }
+    });
+  };
+  server.on('upgrade', (req, socket, head) => {
+    const origin = req.headers.origin;
+    const token = (req.headers.cookie || '').split(';').map(v => v.trim()).find(v => v.startsWith('carubra_session='))?.slice('carubra_session='.length) || '';
+    if (!req.url?.startsWith('/ws')) { socket.destroy(); return; }
+    const url = new URL(req.url,config.origin);
+    const roomId = url.searchParams.get('roomId') || 'default';
+    if (url.pathname !== '/ws' || !validClient(token,roomId) || (origin !== config.origin && !(process.env.NODE_ENV !== 'production' && origin === 'http://127.0.0.1:5173'))) {
+      socket.end('HTTP/1.1 401 Unauthorized\r\nConnection: close\r\n\r\n');
+      return;
+    }
+    const rt = runtime(roomId);
+    wss.handleUpgrade(req,socket,head,ws => connectRoom(ws,token,rt));
+  });
+  if (!provided) for (const room of identity.db.prepare('SELECT id FROM rooms').all()) runtime(String(room.id));
+  const timer = setInterval(() => {
+    const watched = new Set<string>();
+    for (const [id,client] of clients) {
+      const role = validClient(client.token,client.roomId);
+      if (!role) { runtime(client.roomId).queue.release(id); client.socket.close(1008,'Akses ruang berakhir'); }
+      else {
+        watched.add(client.roomId);
+        if (!controllers.includes(role)) runtime(client.roomId).queue.release(id);
+        if (client.socket.readyState === WebSocket.OPEN) client.socket.ping();
+      }
+    }
+    for (const rt of runtimes.values()) {
+      rt.queue.tick();
+      if (watched.has(rt.id) || rt.queue.current()) void rt.observer.refresh();
+      void rt.notifications.dispatch().then(() => broadcast(rt)).catch(() => {});
+    }
+  },5000);
+  timer.unref();
+  return { app, server, store, spotify, queue, notifications, observer, runtime, close: () => {
+    clearInterval(timer);
+    for (const client of clients.values()) client.socket.terminate();
+    clients.clear();
+    wss.close();
+    server.close();
+    for (const rt of runtimes.values()) {
+      rt.observer.stop();
+      rt.queue.removeAllListeners();
+      rt.store.close();
+    }
+    identity.close();
+  } };
 }

@@ -75,10 +75,10 @@ Notifikasi hanya setelah playback terkonfirmasi, satu outbox per request. Pengir
 
 ## Operasional
 
-Source: `I:\website-devops\spotify-player`. Node.js 24, React/Vite, Express/WebSocket, SQLite. Tidak ada migration PostgreSQL.
+Source development: `I:\website-devops\spotify-player-dev`. Node.js 24, React/Vite, Express/WebSocket, SQLite.
 
 ```powershell
-cd I:\website-devops\spotify-player
+cd I:\website-devops\spotify-player-dev
 npm ci
 npm run check
 npx playwright install chromium
@@ -86,12 +86,12 @@ npm run test:browser
 .\scripts\backup.ps1
 docker compose up -d --build
 docker compose ps
-Invoke-RestMethod http://127.0.0.1:3210/healthz
+Invoke-RestMethod http://127.0.0.1:3211/healthz
 ```
 
 Health memiliki `queueMode: application`. Password operator, Client ID, kunci enkripsi, WAHA key, dan integration token berada pada `.env` (diabaikan Git). `WHATSAPP_GROUP_IDS` menerima ID grup dipisahkan koma. Jangan bagikan `.env` atau token akses.
 
-Volume `spotify-player_player-data` berisi `player.sqlite`. Jangan jalankan `docker compose down -v`. Backup SQLite melalui VACUUM INTO ke folder host `backups`; salin juga `.env` secara aman dan simpan backup di perangkat lain. Backup satu komputer bukan pemulihan bila komputer rusak. Simpan image pengganti sebelumnya untuk rollback.
+Volume `dev-spotify-player_dev-player-data` menyimpan data development. Perintah `scripts/backup.ps1` mengambil snapshot SQLite development ke folder host `backups`. Simpan juga `.env` secara aman karena kunci enkripsi diperlukan saat pemulihan. Simpan semua file dalam satu set backup untuk pemulihan multi-ruang.
 
 Polling Spotify hanya membaca `/me/player`, maksimal sekali per 15 detik untuk metadata/volume, dan mengikuti Retry-After saat 429. Antrean berasal dari SQLite dan broadcast WebSocket, sehingga tidak perlu membaca endpoint queue Spotify. SDK browser melaporkan progress setiap 3 detik.
 
@@ -110,7 +110,7 @@ Produksi tetap pada `I:\website-devops\spotify-player`, branch `main`.
 
 Development memakai container/image `dev-spotify-player`, port `http://127.0.0.1:3211`, volume `dev-spotify-player_dev-player-data`, dan jaringan Compose tersendiri. Database dimulai kosong; token Spotify, data request, dan konfigurasi WAHA produksi tidak disalin. Password operator awal sama dengan produksi agar operator dapat login; `.env`, kunci enkripsi, dan integration token development terpisah.
 
-Spotify Client ID dan WAHA dibaca dari `.env` development. Jangan hubungkan akun Spotify produksi untuk pengujian karena satu akun Spotify berbagi playback antarperangkat meskipun database terpisah. Untuk pengujian audio, gunakan akun Premium serta Spotify Developer App pengujian dan daftarkan callback origin development. Untuk WAHA gunakan session dan grup pengujian terpisah sebelum mengaktifkan integrasi.
+Spotify Client ID dan WAHA dibaca dari `.env` development. Gunakan akun Premium pengujian karena playback mengikuti akun Spotify di semua perangkat. Tambahkan akun pengujian ke Spotify Developer App sesuai izin aplikasi. WAHA menggunakan session `carubra` dan grup pengujian yang didaftarkan di `.env` development.
 
 Jalankan build/deploy development hanya dari worktree development:
 
@@ -132,3 +132,15 @@ Container development terhubung ke `carubra-network` untuk ingress tunnel; volum
 Compose membaca `SPOTIFY_CLIENT_ID`, `WHATSAPP_GROUP_IDS`, `WAHA_URL`, `WAHA_API_KEY`, dan `WAHA_SESSION` dari `.env` worktree development. File ini diabaikan Git. Setelah mengubah `.env`, jalankan `docker compose up -d --force-recreate` dari worktree development. Gunakan hanya grup pengujian; jangan masukkan grup produksi. Session WAHA harus tersedia dan WORKING sebelum workflow diaktifkan.
 
 Workflow n8n development: `xanTFAOSvArYVB9E` (Ruang Musik · DEVELOPMENT), aktif. Session WAHA `carubra` digunakan bersama dengan filter grup pengujian terpisah; webhook lama dipertahankan. Credential API development terpisah dari produksi. Registrasi webhook memulai ulang session WAHA; lakukan perubahan berikutnya pada waktu yang sesuai. Script provisioning `scripts/n8n/setup-development.cjs` hanya untuk pembuatan pertama, bukan dijalankan ulang pada workflow yang sudah tersedia.
+
+### Multi-ruang
+
+Login admin awal memakai `owner@local` dan `ADMIN_PASSWORD` pada `.env` development. Pilih atau buat ruang dari bar atas. Pemilik ruang dapat mengundang anggota atau operator dari Pengaturan. Tautan undangan berlaku 24 jam dan sekali pakai. Bagikan tautan hanya ke orang yang diundang. Akun yang sudah terdaftar langsung ditambahkan ke ruang dengan peran yang dipilih.
+
+Anggota dapat mencari dan meminta lagu. Operator juga dapat mengatur player dan antrean. Pemilik mengelola koneksi Spotify, grup WhatsApp, serta keanggotaan. Admin memiliki akses ke seluruh ruang.
+
+Hubungkan akun Spotify Premium berbeda untuk setiap ruang yang akan memutar bersamaan. Callback tetap `https://dev-spotify.carubra.com/auth/spotify/callback`. Browser yang aktif mengeluarkan audio untuk ruang yang dipilih.
+
+Untuk memasangkan grup lain, masukkan ID grup pengujian ke `WHATSAPP_GROUP_IDS` di `.env` development dan buat ulang container. Di Pengaturan ruang, masukkan ID grup itu lalu kirim `/hubungkan KODE` dari grup tersebut dalam 10 menit. Workflow n8n development meneruskan session dan grup ke backend untuk pemilihan ruang. Jika grup sudah berada di ruang lain, lepaskan dari ruang asal terlebih dahulu. Admin dapat memindahkan grup dari Ruang utama dengan kode yang sama. Riwayat dan antrean tetap berada di ruang tempat request dibuat.
+
+Database `player.sqlite` lama tetap dipakai oleh Ruang utama, termasuk antrean dan koneksi Spotify yang sudah tersimpan. `identity.sqlite` menyimpan akun dan keanggotaan. Ruang baru memiliki database sendiri di `rooms/`. Gunakan `scripts/backup.ps1` untuk mencadangkan ketiganya.
