@@ -1,0 +1,143 @@
+@media (min-width: 600px) and (min-height: 600px) {
+  .app-shell {
+    min-height: 0;
+    height: 100vh;
+    height: 100dvh;
+  }
+
+  .app-shell .workspace {
+    display: grid;
+    grid-template-rows: auto minmax(0, 1fr) auto;
+    height: 100%;
+    padding-bottom: 0;
+  }
+
+  .app-shell .topbar { height: 62px; }
+  .app-shell .sidebar { overflow-y: auto; }
+  .app-shell .playback-bar {
+    position: static;
+    min-height: 70px;
+    padding-block: 10px;
+  }
+
+  .app-shell .main-content {
+    display: flex;
+    flex-direction: column;
+    gap: clamp(10px, 1.6dvh, 16px);
+    width: 100%;
+    min-height: 0;
+    margin: 0 auto;
+    padding: clamp(12px, 2.4dvh, 24px) clamp(16px, 2.7vw, 44px);
+    overflow: auto;
+  }
+
+  .app-shell .page-heading,
+  .app-shell .request-section,
+  .app-shell .setup-banner,
+  .app-shell .error-banner,
+  .app-shell .notice-banner {
+    flex: none;
+    margin: 0;
+  }
+
+  .app-shell .page-heading h1 {
+    margin: 0 0 4px;
+    font-size: clamp(24px, 3.8dvh, 32px);
+  }
+
+  .app-shell .page-heading .eyebrow,
+  .app-shell .workspace-badge,
+  .app-shell .content-footer,
+  .app-shell .how-it-works {
+    display: none;
+  }
+
+  .app-shell .setup-banner,
+  .app-shell .error-banner,
+  .app-shell .notice-banner { padding: 8px 12px; }
+  .app-shell .setup-banner > div { min-width: 0; }
+  .app-shell .search-form { padding-block: 6px; }
+  .app-shell .request-meta { margin-top: 6px; }
+  .app-shell .search-results { max-height: min(320px, 35dvh); }
+
+  .app-shell .player-grid {
+    flex: 1 1 0;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.35fr);
+    grid-template-rows: minmax(0, 1fr);
+    gap: clamp(12px, 1.5vw, 24px);
+    min-height: 230px;
+  }
+
+  .app-shell .now-panel,
+  .app-shell .queue-panel {
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    padding: clamp(12px, 1.7dvh, 20px);
+  }
+
+  .app-shell .now-panel > :not(.art-stage),
+  .app-shell .queue-panel > :not(.queue-list, .queue-empty) { flex: none; }
+
+  .app-shell .now-panel { overflow: auto; }
+  .app-shell .art-stage {
+    container-type: size;
+    flex: 1 1 0;
+    display: grid;
+    place-items: center;
+    min-height: 64px;
+    max-width: none;
+    margin: 4px 0 8px;
+    padding: 0;
+  }
+
+  .app-shell .art-stage .cover-art { width: min(100cqw, 100cqh, 350px); }
+  .app-shell .art-stage .cover-empty > span { display: none; }
+  .app-shell .record-center svg { width: min(30px, 10cqh, 10cqw); height: auto; }
+  .app-shell .current-heading > div { min-width: 0; overflow-wrap: anywhere; }
+  .app-shell .current-heading h2 { font-size: clamp(18px, 2.6dvh, 23px); }
+  .app-shell .current-heading p { margin-top: 2px; }
+  .app-shell .requested-by { margin: 6px 0; }
+  .app-shell .time-labels { margin-top: 5px; }
+  .app-shell .player-activation { margin-top: 8px; }
+  .app-shell .player-activation p { margin-top: 4px; }
+  .app-shell .player-attribution { margin-top: 8px; padding-top: 8px; }
+
+  .app-shell .panel-description { margin: 2px 0 8px; }
+  .app-shell .queue-list,
+  .app-shell .queue-empty {
+    flex: 1 1 0;
+    min-height: 0;
+    max-height: none;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .app-shell .queue-empty {
+    padding: 12px 8px;
+    justify-content: safe center;
+  }
+  .app-shell .empty-icon { flex: none; width: 44px; height: 44px; border-radius: 12px; }
+  .app-shell .empty-icon svg { width: 22px; }
+  .app-shell .queue-empty h3 { margin: 10px 0 4px; }
+  .app-shell .empty-command { margin-top: 10px; }
+  .app-shell .queue-footer { padding: 8px 0 0; }
+  .app-shell .queue-row { padding-block: 8px; }
+  .app-shell .history-panel {
+    flex: 1 1 0;
+    min-height: 160px;
+    overflow: auto;
+    overscroll-behavior: contain;
+  }
+
+  .app-shell .queue-list:focus-visible,
+  .app-shell .history-panel:focus-visible {
+    outline: 2px solid var(--lime);
+    outline-offset: -2px;
+  }
+}
+
+@media (min-width: 600px) and (max-width: 850px) and (min-height: 600px) {
+  .app-shell .volume-controls { display: flex; }
+  .app-shell .volume-controls input { width: 72px; }
+}
