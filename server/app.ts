@@ -15,7 +15,7 @@ import { Queue } from './queue.ts';
 import { SpotifyObserver } from './spotify-observer.ts';
 import { Notifications } from './notifications.ts';
 import { Identity, type Role, type User } from './identity.ts';
-import { getWahaJoinInfo, inviteCodeFromUrl, joinWahaGroup, verifyWahaMessage, type IncomingMessage, type WahaJoinInfo, type WahaJoinStatus } from './waha.ts';
+import { getWahaGroupParticipants, getWahaJoinInfo, getWahaParticipantAlias, inviteCodeFromUrl, joinWahaGroup, normalizeParticipantId, verifyWahaMessage, type IncomingMessage, type WahaJoinInfo, type WahaJoinStatus, type WahaParticipant } from './waha.ts';
 import { equal, hash, secret } from './crypto.ts';
 import { AppError, type SongRequest } from './types.ts';
 import type { Config } from './config.ts';
@@ -23,6 +23,8 @@ export function createApp(config: Config, provided?: Store, services: {
   verifyPairingMessage?: (message: IncomingMessage) => Promise<boolean>;
   getJoinInfo?: (code: string) => Promise<WahaJoinInfo>;
   joinGroup?: (code: string, info: WahaJoinInfo) => Promise<WahaJoinStatus>;
+  getGroupParticipants?: (groupId: string) => Promise<WahaParticipant[]>;
+  getParticipantAlias?: (id: string, signal?: AbortSignal) => Promise<string | null>;
 } = {}) {
   const store = provided || new Store(join(config.dataDir, 'player.sqlite')), spotify = new Spotify(config, store), queue = new Queue(store, spotify);
   const blockedGroups = new Set(['0@g.us', ...config.blockedGroupIds]);
@@ -31,6 +33,8 @@ export function createApp(config: Config, provided?: Store, services: {
   const verifyPairingMessage = services.verifyPairingMessage ?? (message => verifyWahaMessage(config,message));
   const getJoinInfo = services.getJoinInfo ?? (code => getWahaJoinInfo(config,code));
   const joinGroup = services.joinGroup ?? ((code,info) => joinWahaGroup(config,code,info));
+  const getGroupParticipants = services.getGroupParticipants ?? (groupId => getWahaGroupParticipants(config,groupId));
+  const getParticipantAlias = services.getParticipantAlias ?? ((id,signal) => getWahaParticipantAlias(config,id,signal));
   const verifyBoundMessages = !!(services.verifyPairingMessage || (config.wahaUrl && config.wahaKey));
   const notificationsFor = (roomId: string, roomStore: Store) => new Notifications(roomStore, config, groupId =>
     !blockedGroups.has(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
@@ -79,7 +83,12 @@ export function createApp(config: Config, provided?: Store, services: {
   });
   app.disable('x-powered-by'); app.set('trust proxy', config.trustProxy);
   app.use(helmet({ contentSecurityPolicy: { directives: { defaultSrc: ["'self'"], scriptSrc: ["'self'", 'https://sdk.scdn.co'], styleSrc: ["'self'", "'unsafe-inline'"], imgSrc: ["'self'", 'data:', 'https://i.scdn.co', 'https://mosaic.scdn.co', 'https://image-cdn-ak.spotifycdn.com', 'https://image-cdn-fa.spotifycdn.com'], connectSrc: ["'self'", 'https://*.spotify.com', 'https://*.scdn.co', 'wss://*.spotify.com'], frameSrc: ['https://sdk.scdn.co', 'https://*.spotify.com'], mediaSrc: ["'self'", 'blob:', 'https://*.scdn.co', 'https://*.spotifycdn.com'], upgradeInsecureRequests: config.cookieSecure ? [] : null } }, crossOriginEmbedderPolicy: false, crossOriginOpenerPolicy: { policy: 'same-origin-allow-popups' }, strictTransportSecurity: config.cookieSecure ? undefined : false }));
-  app.use(express.json({ limit: '16kb' }), cookieParser());
+  const standardJson = express.json({limit:'16kb'});
+  const controlsJson = express.json({limit:'48kb'});
+  app.use((req,res,next) => {
+    const largerPayload = req.method === 'PUT' && /^\/api\/rooms\/[^/]+\/whatsapp\/controls\/?$/i.test(req.path);
+    (largerPayload ? controlsJson : standardJson)(req,res,next);
+  },cookieParser());
   app.get('/healthz', (_req, res) => res.json({ ok: true, queueMode: 'application', rooms: true }));
   const userFor = (req: express.Request) => { const user = identity.session(req.cookies?.carubra_session || ''); if (!user) throw new AppError('Masuk terlebih dahulu.', 401); return user; };
   const roomFor = (req: express.Request, roles?: Role[]) => { const user = userFor(req), roomId = req.get('x-room-id') || 'default'; identity.require(user,roomId,roles); return runtime(roomId); };
@@ -222,6 +231,80 @@ export function createApp(config: Config, provided?: Store, services: {
     identity.unbindGroup(userFor(req),String(req.params.id),String(req.params.groupId));
     res.json({ok:true});
   });
+  function requireControlGroup(roomId: string, groupId: string) {
+    requireActiveRoom(roomId);
+    if (blockedGroups.has(groupId) || identity.roomForGroup(groupId,config.wahaSession) !== roomId) {
+      throw new AppError('Grup WhatsApp ini belum terhubung ke ruang tersebut.',403);
+    }
+  }
+  function requireControlManager(req: express.Request, roomId: string, groupId?: string) {
+    const user = userFor(req);
+    identity.require(user,roomId,['owner']);
+    if (groupId) requireControlGroup(roomId,groupId);
+    else requireActiveRoom(roomId);
+    return user;
+  }
+  function matchesControlIdentity(roster: WahaParticipant[], id: string, alternate: string) {
+    const matching = roster.filter(({aliases})=>aliases.includes(id) || aliases.includes(alternate));
+    return matching.length > 0 && matching.every(({aliases})=>aliases.every(alias=>alias === id || alias === alternate));
+  }
+  const controlGroupId = z.string().regex(/^\d{1,30}@g\.us$/);
+  app.get('/api/rooms/:id/whatsapp/control-groups',auth,(req,res) => {
+    const roomId = String(req.params.id);
+    requireControlManager(req,roomId);
+    const groups = identity.groupsForRoom(roomId,config.wahaSession).filter(group => !blockedGroups.has(group));
+    res.json({groups});
+  });
+  app.get('/api/rooms/:id/whatsapp/controls',auth,async (req,res) => {
+    const roomId = String(req.params.id), groupId = controlGroupId.parse(req.query.groupId);
+    requireControlManager(req,roomId,groupId);
+    const roster = await getGroupParticipants(groupId);
+    requireControlManager(req,roomId,groupId);
+    const allowedIds = new Set(identity.controlAliases(roomId,groupId,config.wahaSession));
+    const rosterIds = new Set(roster.flatMap(participant=>participant.aliases));
+    const hasLids = [...rosterIds].some(id=>id.endsWith('@lid'));
+    const hasPhones = [...rosterIds].some(id=>id.endsWith('@c.us'));
+    const unmatched = [...allowedIds].filter(id=>!rosterIds.has(id));
+    const toResolve = unmatched.filter(id=>id.endsWith('@lid') ? hasPhones : hasLids);
+    const resolved = new Map<string,string>();
+    const deadline = AbortSignal.timeout(6000);
+    for (let index = 0; index < toResolve.length && !deadline.aborted; index += 8) {
+      const batch = toResolve.slice(index,index+8);
+      const alternates = await Promise.all(batch.map(id=>getParticipantAlias(id,deadline)));
+      for (const [position,id] of batch.entries()) {
+        const alternate = alternates[position];
+        if (alternate && matchesControlIdentity(roster,id,alternate)) resolved.set(id,alternate);
+      }
+      requireControlManager(req,roomId,groupId);
+    }
+    const currentIds = identity.controlAliases(roomId,groupId,config.wahaSession);
+    const allowedRosterIds = new Set(currentIds);
+    for (const id of currentIds) {
+      const alternate = resolved.get(id);
+      if (alternate) allowedRosterIds.add(alternate);
+    }
+    res.json({groupId,unmatchedPermissions:currentIds.some(id=>!rosterIds.has(id) && !resolved.has(id)),participants:roster.map(({id,phone,aliases}) =>
+      ({id,phone,allowed:aliases.some(alias=>allowedRosterIds.has(alias))}))});
+  });
+  app.put('/api/rooms/:id/whatsapp/controls',auth,async (req,res) => {
+    const roomId = String(req.params.id);
+    const {groupId,participantIds} = z.object({
+      groupId:controlGroupId,
+      participantIds:z.array(z.string().refine(id=>normalizeParticipantId(id) === id)).max(1024)
+    }).parse(req.body);
+    requireControlManager(req,roomId,groupId);
+    const roster = participantIds.length ? await getGroupParticipants(groupId) : [];
+    const actor = requireControlManager(req,roomId,groupId);
+    const byId = new Map(roster.map(participant=>[participant.id,participant]));
+    const aliases = new Set<string>();
+    for (const id of new Set(participantIds)) {
+      const participant = byId.get(id);
+      if (!participant) throw new AppError('Daftar anggota berubah. Muat ulang anggota grup sebelum menyimpan.',409);
+      for (const alias of participant.aliases) aliases.add(alias);
+    }
+    identity.replaceControlAliases(actor,roomId,groupId,config.wahaSession,[...aliases]);
+    res.json({ok:true});
+  });
   const publicRequest = (r: SongRequest | null) => { if (!r) return null; const { senderId: _sender, messageId: _message, groupId: _group, ...publicData } = r; return publicData; };
   const snapshot = (rt: Runtime) => ({ roomId:rt.id, current: publicRequest(rt.queue.current()), queue: rt.store.list('queued', 500).map(publicRequest), history: rt.store.list(undefined, 20).map(publicRequest), playback: rt.queue.playback, spotifyPlayback: rt.observer.state, notificationsFailed: Number((rt.store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: rt.spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!(config.wahaKey && config.wahaUrl), callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
   const broadcast = (rt: Runtime) => {
@@ -358,6 +441,24 @@ export function createApp(config: Config, provided?: Store, services: {
     changeVolume(roomFor(req,controllers), z.number().int().min(0).max(100).parse(req.body.volume));
     res.json({ok:true});
   });
+  async function authorizeWhatsAppControl(roomId: string, groupId: string, senderId: string) {
+    requireControlGroup(roomId,groupId);
+    const id = normalizeParticipantId(senderId);
+    const denied = () => new AppError('Kamu belum diizinkan mengontrol pemutaran di ruang ini.',403);
+    if (!id || !identity.controlAliases(roomId,groupId,config.wahaSession).length) throw denied();
+    const roster = await getGroupParticipants(groupId);
+    const canControl = (alternate: string | null) => {
+      requireControlGroup(roomId,groupId);
+      const allowed = new Set(identity.controlAliases(roomId,groupId,config.wahaSession));
+      const senderIds = alternate ? [id,alternate] : [id];
+      if (alternate && !matchesControlIdentity(roster,id,alternate)) return false;
+      return roster.some(({aliases})=>aliases.some(alias=>senderIds.includes(alias)) &&
+        [...aliases,...senderIds].some(alias=>allowed.has(alias)));
+    };
+    if (canControl(null)) return;
+    const alternate = roster.length ? await getParticipantAlias(id) : null;
+    if (!alternate || !canControl(alternate)) throw denied();
+  }
   const whatsappPayload = z.object({
     groupId:z.string().max(100),session:z.string().max(100).default(config.wahaSession),
     senderId:z.string().regex(/^[0-9]+@(?:c\.us|s\.whatsapp\.net|lid)$/),messageId:z.string().min(1).max(250),
@@ -428,7 +529,8 @@ export function createApp(config: Config, provided?: Store, services: {
       if (receipt) { res.json({reply:receipt,duplicate:true}); return; }
       try {
         const reply = await whatsappCommand(body.text, {requester:body.requester || 'Anggota WhatsApp',source:'whatsapp',senderId:body.senderId,groupId:body.groupId,messageId:body.messageId},
-          {queue:rt.queue,spotify:rt.spotify,store:rt.store,roomName:rt.name,roomUrl:config.origin+'/?room='+rt.id,volume:value=>changeVolume(rt,value)});
+          {queue:rt.queue,spotify:rt.spotify,store:rt.store,roomName:rt.name,roomUrl:config.origin+'/?room='+rt.id,volume:value=>changeVolume(rt,value),
+            authorizeControl:()=>authorizeWhatsAppControl(roomId,body.groupId,body.senderId)});
         identity.saveReply(receiptId,reply);
         res.json({reply});
       } catch (error) {

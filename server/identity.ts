@@ -29,6 +29,7 @@ export class Identity {
       CREATE TABLE IF NOT EXISTS rooms (id TEXT PRIMARY KEY, name TEXT NOT NULL, owner_id TEXT NOT NULL REFERENCES users(id), created_at INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS room_members (room_id TEXT NOT NULL REFERENCES rooms(id), user_id TEXT NOT NULL REFERENCES users(id), role TEXT NOT NULL CHECK(role IN ('owner','operator','member')), PRIMARY KEY(room_id,user_id));
       CREATE TABLE IF NOT EXISTS room_groups (group_id TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), session TEXT NOT NULL);
+      CREATE TABLE IF NOT EXISTS room_control_aliases (room_id TEXT NOT NULL REFERENCES rooms(id), group_id TEXT NOT NULL, session TEXT NOT NULL, alias TEXT NOT NULL, PRIMARY KEY(room_id,group_id,session,alias));
       CREATE TABLE IF NOT EXISTS sessions (hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), expires INTEGER NOT NULL);
       CREATE TABLE IF NOT EXISTS spotify_accounts (spotify_id TEXT PRIMARY KEY, room_id TEXT NOT NULL UNIQUE REFERENCES rooms(id));
       CREATE TABLE IF NOT EXISTS invitations (hash TEXT PRIMARY KEY, room_id TEXT NOT NULL REFERENCES rooms(id), email TEXT NOT NULL COLLATE NOCASE, name TEXT NOT NULL, role TEXT NOT NULL CHECK(role IN ('operator','member')), expires INTEGER NOT NULL, UNIQUE(room_id,email));
@@ -99,6 +100,28 @@ export class Identity {
   groupsForRoom(roomId: string, session: string) {
     return this.db.prepare('SELECT g.group_id FROM room_groups g JOIN rooms r ON r.id=g.room_id WHERE g.room_id=? AND g.session=? AND r.deleted_at IS NULL')
       .all(roomId,session).map(row => String(row.group_id));
+  }
+  controlAliases(roomId: string, groupId: string, session: string): string[] {
+    return this.db.prepare(`SELECT a.alias FROM room_control_aliases a
+      JOIN room_groups g ON g.room_id=a.room_id AND g.group_id=a.group_id AND g.session=a.session
+      JOIN rooms r ON r.id=g.room_id
+      WHERE a.room_id=? AND a.group_id=? AND a.session=? AND r.deleted_at IS NULL
+      ORDER BY a.alias`).all(roomId,groupId,session).map(row => String(row.alias));
+  }
+  replaceControlAliases(actor: User, roomId: string, groupId: string, session: string, aliases: string[]): void {
+    this.transaction(() => {
+      this.require(actor,roomId,['owner']);
+      const bound = this.db.prepare(`SELECT 1 FROM room_groups g JOIN rooms r ON r.id=g.room_id
+        WHERE g.room_id=? AND g.group_id=? AND g.session=? AND r.deleted_at IS NULL`).get(roomId,groupId,session);
+      if (!bound) throw new AppError('Grup tidak terhubung ke ruang ini.',409);
+      const normalized = [...new Set(aliases.map(alias => alias.trim().toLowerCase()))];
+      if (normalized.length !== aliases.length || normalized.some(alias => !/^[0-9]{1,24}@(c\.us|lid)$/.test(alias))) {
+        throw new AppError('ID WhatsApp tidak valid atau duplikat.',400);
+      }
+      this.db.prepare('DELETE FROM room_control_aliases WHERE room_id=? AND group_id=? AND session=?').run(roomId,groupId,session);
+      const insert = this.db.prepare('INSERT INTO room_control_aliases(room_id,group_id,session,alias) VALUES(?,?,?,?)');
+      for (const alias of normalized) insert.run(roomId,groupId,session,alias);
+    });
   }
   createRoom(owner: User, name: string) {
     const id = randomUUID();
@@ -188,6 +211,7 @@ export class Identity {
     this.transaction(() => {
       const result = this.db.prepare('DELETE FROM room_groups WHERE room_id=? AND group_id=?').run(roomId,groupId);
       if (!result.changes) throw new AppError('Grup tidak terhubung ke ruang ini.',409);
+      this.db.prepare('DELETE FROM room_control_aliases WHERE room_id=? AND group_id=?').run(roomId,groupId);
       if (!this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) this.issueVerification(roomId);
     });
   }
@@ -202,6 +226,7 @@ export class Identity {
         this.db.prepare('DELETE FROM group_pairings WHERE room_id=?').run(roomId);
       }
       this.db.prepare('DELETE FROM room_groups WHERE room_id=?').run(roomId);
+      this.db.prepare('DELETE FROM room_control_aliases WHERE room_id=?').run(roomId);
       this.db.prepare('DELETE FROM spotify_accounts WHERE room_id=?').run(roomId);
       this.db.prepare('DELETE FROM room_members WHERE room_id=?').run(roomId);
     });

@@ -18,6 +18,25 @@ export interface WahaJoinInfo {
 export type WahaJoinStatus = 'joined' | 'already_member' | 'pending';
 const groupIdFormat = /^[0-9]+@g\.us$/;
 
+export interface WahaParticipant {
+  id: string;
+  phone: string | null;
+  aliases: string[];
+}
+
+export function normalizeParticipantId(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const match = /^(\d{1,24})@(c\.us|s\.whatsapp\.net|lid)$/.exec(value);
+  if (!match) return null;
+  return match[1] + (match[2] === 'lid' ? '@lid' : '@c.us');
+}
+
+function normalizePhoneId(value: unknown) {
+  if (typeof value === 'string' && /^\+?\d{1,24}$/.test(value)) return value.replace(/^\+/,'')+'@c.us';
+  const id = normalizeParticipantId(value);
+  return id?.endsWith('@c.us') ? id : null;
+}
+
 export function inviteCodeFromUrl(value: string) {
   let url: URL;
   try { url = new URL(value.trim()); }
@@ -47,7 +66,7 @@ function wahaGroupsPath(config: Config) {
   return '/api/' + encodeURIComponent(config.wahaSession) + '/groups';
 }
 
-async function wahaGroupRequest(config: Config, path: string, body?: {code: string}) {
+async function wahaGroupRequest(config: Config, path: string, body?: {code: string}, signal = AbortSignal.timeout(body ? 12000 : 6000)) {
   if (!config.wahaUrl || !config.wahaKey) throw new AppError('WhatsApp belum dikonfigurasi.',503);
   const headers: Record<string,string> = {'X-Api-Key':config.wahaKey};
   if (body) headers['Content-Type'] = 'application/json';
@@ -56,8 +75,55 @@ async function wahaGroupRequest(config: Config, path: string, body?: {code: stri
     headers,
     body:body ? JSON.stringify(body) : undefined,
     redirect:'error',
-    signal:AbortSignal.timeout(body ? 12000 : 6000)
+    signal
   }).catch(() => { throw new AppError('WAHA belum merespons. Periksa apakah Carubra sudah masuk ke grup.',503); });
+}
+
+export async function getWahaGroupParticipants(config: Config, groupId: string): Promise<WahaParticipant[]> {
+  if (!groupIdFormat.test(groupId)) throw new AppError('ID grup WhatsApp tidak valid.');
+  const response = await wahaGroupRequest(config,wahaGroupsPath(config)+'/'+encodeURIComponent(groupId)+'/participants/v2');
+  const rows: unknown = await response.json().catch(() => null);
+  if (!response.ok || !Array.isArray(rows)) {
+    throw new AppError('Daftar anggota grup belum bisa diperiksa. Pastikan Carubra masih berada di grup.',503);
+  }
+  const participants = new Map<string,WahaParticipant>();
+  let activeRows = 0;
+  for (const row of rows) {
+    const {id:rawId,pn,role} = asRecord(row);
+    if (role === 'left') continue;
+    activeRows++;
+    const participant = normalizeParticipantId(rawId);
+    const phoneId = normalizePhoneId(pn);
+    const id = participant || phoneId;
+    if (!id) continue;
+    const aliases = id.endsWith('@lid') && phoneId ? [id,phoneId] : [id];
+    if (participants.get(id)?.phone && !phoneId) continue;
+    const phone = aliases.find(alias => alias.endsWith('@c.us'))?.split('@')[0];
+    participants.set(id,{id,phone:phone ? '+'+phone : null,aliases});
+  }
+  if (activeRows && !participants.size) throw new AppError('Identitas anggota grup belum bisa dibaca.',503);
+  for (const {id,aliases} of participants.values()) {
+    if (id.endsWith('@lid') && aliases[1]) participants.delete(aliases[1]);
+  }
+  return [...participants.values()];
+}
+
+export async function getWahaParticipantAlias(config: Config, id: string, signal?: AbortSignal): Promise<string | null> {
+  const canonical = normalizeParticipantId(id);
+  if (!canonical) return null;
+  const fromLid = canonical.endsWith('@lid');
+  const path = '/api/'+encodeURIComponent(config.wahaSession)+'/lids/'+(fromLid ? '' : 'pn/')+encodeURIComponent(canonical);
+  try {
+    const response = await wahaGroupRequest(config,path,undefined,signal);
+    if (!response.ok) return null;
+    const mapping = asRecord(await response.json());
+    const lid = normalizeParticipantId(mapping.lid), phone = normalizePhoneId(mapping.pn);
+    if (!lid?.endsWith('@lid') || !phone) return null;
+    if (fromLid) return lid === canonical ? phone : null;
+    return phone === canonical ? lid : null;
+  } catch {
+    return null;
+  }
 }
 
 export async function getWahaJoinInfo(config: Config, code: string): Promise<WahaJoinInfo> {
