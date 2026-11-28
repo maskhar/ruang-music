@@ -1,0 +1,68 @@
+.breadcrumb select,.room-admin-panel select{background:#21261d;border:1px solid #48543a;border-radius:8px;color:#eeefe8;min-height:42px;padding:8px 30px 8px 12px;font:inherit;max-width:min(34vw,240px)}
+.breadcrumb select:focus-visible,.room-admin-panel select:focus-visible{outline:2px solid var(--lime);outline-offset:3px}
+.room-create-inline{display:flex;align-items:center;gap:3px;margin-left:8px}
+.room-create-inline input{width:140px;min-height:42px;padding:8px 10px}
+.room-admin-panel{border:1px solid var(--line);background:#171b15;border-radius:12px;padding:18px;margin-bottom:22px;display:grid;gap:12px}
+.room-admin-panel h3{font-size:16px;color:#eef3df}
+.room-admin-panel form{display:grid;gap:10px}
+.room-admin-panel label{font-size:13px;color:#d9dfd0}
+.room-admin-panel input,.room-admin-panel select{width:100%;max-width:100%}
+.room-admin-panel form button{justify-self:start}
+.room-admin-panel .invite-result{padding:12px;border-radius:9px;background:#25321e;display:grid;gap:9px}
+.room-admin-panel .invite-result input{font-size:12px}
+.room-admin-panel .invite-result button{justify-self:start}
+.room-admin-panel .pair-code{background:#26301e;padding:12px;border-radius:8px;color:#e8efdb}
+.room-admin-panel code{color:var(--lime)}
+.rooms-dashboard{min-height:100dvh;background:radial-gradient(ellipse at 12% 0%,rgba(132,166,68,.13),transparent 36%),#10120f;color:#eff1e9}
+.rooms-header{height:76px;display:flex;align-items:center;justify-content:space-between;padding:0 clamp(20px,5vw,76px);border-bottom:1px solid #292e25;background:rgba(16,18,15,.9)}
+.rooms-header .brand{display:flex;align-items:center;gap:10px;color:#f5f6f0;font-weight:700;font-size:18px;text-decoration:none}
+.rooms-account{display:flex;align-items:center;gap:16px;color:#c4c9ba}
+.rooms-main{max-width:1240px;margin:0 auto;padding:64px clamp(20px,5vw,64px) 100px}
+.rooms-hero{display:flex;justify-content:space-between;align-items:end;gap:28px;margin-bottom:44px}
+.rooms-hero h1{font-size:clamp(32px,5vw,52px);line-height:1.08;letter-spacing:-.04em;margin:0 0 14px}
+.rooms-hero p:not(.eyebrow){max-width:610px;color:#afb5a7;line-height:1.65;margin:0}
+.rooms-toolbar{display:flex;justify-content:space-between;align-items:center;gap:18px;padding:18px 0;border-top:1px solid #292e25}
+.rooms-summary{color:#aeb5a5;font-size:14px}.rooms-summary strong{color:#edf1e5}.rooms-summary span{padding:0 7px;color:#69715e}
+.rooms-filters{display:flex;gap:10px}
+.rooms-search{display:flex;align-items:center;gap:9px;width:min(290px,42vw);padding:0 12px;border:1px solid #343b30;border-radius:9px;background:#191d17;color:#929a88}
+.rooms-search input{width:100%;min-height:42px;border:0;background:transparent;outline:none;color:#edf1e5;font:inherit;font-size:14px}
+.rooms-filters select{min-height:44px;padding:8px 32px 8px 12px;border:1px solid #343b30;border-radius:9px;background:#191d17;color:#e4e8dc;font:inherit}
+.rooms-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:18px}
+.room-card{min-width:0;padding:20px;border:1px solid #30372a;border-radius:14px;background:linear-gradient(145deg,#1b2018,#151813);box-shadow:0 12px 28px #0002}
+.room-card-top{display:flex;align-items:center;justify-content:space-between}
+.room-card-icon{width:42px;height:42px;border:1px solid #3d4a2e;border-radius:11px;display:grid;place-items:center;color:var(--lime);background:#29351e}
+.room-card-status{display:flex;align-items:center;gap:7px;padding:6px 9px;border-radius:99px;font-size:12px}
+.room-card-status.ready{color:#c9e39b;background:#26371d}.room-card-status.pending{color:#ded0a0;background:#322d1d}
+.room-card h2{margin:18px 0 5px;font-size:21px;overflow-wrap:anywhere}
+.room-card-owner{margin:0;color:#9da594;font-size:13px}
+.room-card-connections,.room-card-playback{display:grid;gap:11px;padding:16px 0;border-top:1px solid #2b3127;margin-top:16px}
+.room-card-connections span,.room-card-playback span{display:flex;align-items:center;gap:9px;color:#aeb5a7;font-size:13px;min-width:0}
+.room-card-connections .connected{color:#cde4a5}.room-card-playback .room-playing{color:#d8edae}
+.room-card-playback small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#e9ecdf;padding-left:25px}
+.room-card-open{width:100%;min-height:44px;justify-content:center;margin-top:3px}
+.room-card-actions{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:9px;margin-top:3px}.room-card-actions .room-card-open{margin-top:0}.room-card-delete{min-height:44px;padding:0 13px;justify-content:center}.room-card-delete:focus-visible{outline:2px solid #ffad9b;outline-offset:3px}
+.rooms-empty{min-height:270px;display:grid;align-content:center;justify-items:center;text-align:center;color:#89917e;border:1px dashed #3a4233;border-radius:14px}
+.rooms-empty h2{color:#e8ebdf;margin:16px 0 4px}.rooms-empty p{max-width:420px;line-height:1.6;margin:0}
+.room-create-form{display:grid;gap:12px;padding-top:20px}.room-create-form label{color:#e2e7d9}.room-create-form input{min-height:46px;padding:10px 12px;border:1px solid #46503b;border-radius:8px;background:#11140f;color:#f2f4ed;font:inherit}.room-create-form p{color:#aeb5a7;line-height:1.55;margin:0 0 5px}.room-create-form .primary{justify-content:center;min-height:46px}
+.room-back{font-size:14px;min-height:42px}
+.pair-code-block{display:grid;justify-items:start;gap:10px;padding:15px;border:1px solid #3d4a2e;border-radius:10px;background:#232c1e}
+.pair-code-block code{font-size:18px;color:var(--lime);overflow-wrap:anywhere}.pair-code-block small{color:#b5beaa}
+.whatsapp-join-form{display:grid;gap:9px;padding:14px;border:1px solid #353e2d;border-radius:10px;background:#1c2119}.whatsapp-join-form label{font-size:14px;font-weight:600;color:#e4ead9}.whatsapp-join-form>p{margin:0;color:#aeb5a7;font-size:13px;line-height:1.55}.whatsapp-join-form input{min-width:0;width:100%;box-sizing:border-box;min-height:46px;padding:10px 12px;border:1px solid #46503b;border-radius:8px;background:#11140f;color:#f2f4ed;font:inherit;font-size:16px}.whatsapp-join-form input:focus-visible{outline:2px solid var(--lime);outline-offset:2px}.whatsapp-join-form button{justify-self:start;min-height:44px}.whatsapp-join-form [aria-live]{font-size:13px;line-height:1.5;color:#d8dfce}.whatsapp-join-form [aria-live] p{margin:0}
+.whatsapp-controls h3{display:flex;align-items:center;gap:8px}
+.whatsapp-controls>p{margin:0;line-height:1.55}
+.whatsapp-controls>p:not([role]){color:#c5cbbd}
+.whatsapp-controls>button{justify-self:start;min-height:44px}
+.whatsapp-controls>input{min-height:44px}
+.whatsapp-controls .control-group-label code{overflow-wrap:anywhere}
+.whatsapp-controls>p.control-warning{border-left:3px solid #dbba6b;padding:8px 12px;background:#292719;color:#ecdbaf}
+.whatsapp-controls .control-success{color:#cce5a4}
+.control-list{display:grid;gap:4px;max-height:250px;overflow:auto;border:1px solid #3b4435;border-radius:9px;padding:8px}
+.control-list>p{margin:8px;color:#adb5a3}
+.control-member{display:flex;align-items:center;gap:12px;min-height:44px;padding:8px 10px;border-radius:7px;cursor:pointer;overflow-wrap:anywhere}
+.control-member:hover,.control-member:focus-within{background:#283323}
+.control-member input{width:20px;height:20px;flex:none;accent-color:#b4d478}
+.control-member span{min-width:0}
+@media(max-width:1000px){.rooms-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.rooms-main{padding-top:48px}}
+@media(max-width:680px){.rooms-header{height:64px;padding:0 18px}.rooms-account{gap:10px;font-size:13px}.rooms-account .secondary{padding:8px 10px}.rooms-main{padding:38px 18px 64px}.rooms-hero{align-items:start;flex-direction:column;margin-bottom:30px}.rooms-hero .primary{width:100%;justify-content:center;min-height:46px}.rooms-toolbar{align-items:stretch;flex-direction:column}.rooms-filters{display:grid;grid-template-columns:1fr auto}.rooms-search{width:auto}.rooms-grid{grid-template-columns:1fr;gap:12px}.room-card{padding:17px}.rooms-summary{font-size:13px}.room-back{font-size:0;gap:5px}.room-back svg{width:18px;height:18px}.rooms-filters select{max-width:150px}.pair-code-block{width:100%;box-sizing:border-box}}
+@media(max-width:720px){.breadcrumb{min-width:0}.breadcrumb select{max-width:38vw}.room-create-inline input{width:95px}.room-admin-panel{padding:14px}}
+@media(max-width:560px){.breadcrumb{font-size:0}.breadcrumb>svg{display:none}.breadcrumb select{width:108px;max-width:31vw;font-size:12px}.room-create-inline{margin-left:2px}.room-create-inline input{width:73px;font-size:12px}.room-create-inline button{width:42px}}

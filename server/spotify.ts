@@ -14,20 +14,44 @@ export function spotifyReference(input: string): { type: 'track' | 'album' | 'pl
 export function toTrack(track: any, album?: any): Track { return { uri: track.uri, title: track.name, artist: (track.artists || []).map((a: any) => a.name).join(', '), album: track.album?.name || album?.name || '', image: track.album?.images?.[0]?.url || album?.images?.[0]?.url || '', durationMs: track.duration_ms || 0, url: track.external_urls?.spotify || `https://open.spotify.com/track/${track.id}` }; }
 export class Spotify {
   config: Config; store: Store; refreshPromise: Promise<string> | null = null;
+  private retired = false;
   constructor(config: Config, store: Store) { this.config = config; this.store = store; }
-  get connected() { return !!this.store.get<string>('spotifyTokens'); }
+  get connected() { return !this.retired && !!this.store.get<string>('spotifyTokens'); }
+  retire() { this.retired = true; }
+  private requireActive() {
+    if (this.retired) throw new AppError('Ruang sudah dihapus.',403);
+  }
   challenge(verifier: string) { return createHash('sha256').update(verifier).digest('base64url'); }
-  async exchange(code: string, verifier: string) { return this.tokenRequest({ grant_type: 'authorization_code', code, code_verifier: verifier, redirect_uri: this.config.origin + '/auth/spotify/callback', client_id: this.config.clientId }); }
-  private async tokenRequest(body: Record<string, string>) {
+  async exchange(code: string, verifier: string) {
+    const tokens = await this.requestTokens({grant_type:'authorization_code',code,code_verifier:verifier,redirect_uri:this.config.origin + '/auth/spotify/callback',client_id:this.config.clientId});
+    const profile = await this.request('/me','GET',undefined,tokens.access_token);
+    if (!profile || typeof profile.id !== 'string' || !profile.id) throw new AppError('Identitas akun Spotify tidak tersedia.',502);
+    return { profile, encryptedTokens: encrypt(tokens,this.config.encryptionKey) };
+  }
+  private async requestTokens(body: Record<string, string>, old?: Tokens) {
     const response = await fetch('https://accounts.spotify.com/api/token', { method: 'POST', body: new URLSearchParams(body), signal: AbortSignal.timeout(10000) });
     if (!response.ok) throw new AppError('Login Spotify gagal. Periksa Client ID, callback URL, dan izin akun.', 502);
     const next = await response.json() as any;
+    const refreshToken = next.refresh_token || old?.refresh_token;
+    if (typeof next.access_token !== 'string' || typeof refreshToken !== 'string' || !Number.isFinite(next.expires_in)) {
+      throw new AppError('Token Spotify tidak valid. Hubungkan ulang akun Spotify.',502);
+    }
+    return {access_token:next.access_token,refresh_token:refreshToken,expiresAt:Date.now() + next.expires_in * 1000,scope:next.scope || old?.scope || ''} as Tokens;
+  }
+  private async tokenRequest(body: Record<string, string>) {
     const previous = this.store.get<string>('spotifyTokens');
-    const old = previous ? decrypt<Tokens>(previous, this.config.encryptionKey) : null;
-    const tokens: Tokens = { access_token: next.access_token, refresh_token: next.refresh_token || old?.refresh_token || '', expiresAt: Date.now() + next.expires_in * 1000, scope: next.scope || old?.scope || '' };
-    this.store.set('spotifyTokens', encrypt(tokens, this.config.encryptionKey)); return tokens.access_token;
+    const tokens = await this.requestTokens(body,previous ? decrypt<Tokens>(previous,this.config.encryptionKey) : undefined);
+    this.requireActive();
+    const current = this.store.get<string>('spotifyTokens');
+    if (current !== previous) {
+      if (!current) throw new AppError('Hubungkan akun Spotify terlebih dahulu.',409);
+      return decrypt<Tokens>(current,this.config.encryptionKey).access_token;
+    }
+    this.store.set('spotifyTokens',encrypt(tokens,this.config.encryptionKey));
+    return tokens.access_token;
   }
   async token() {
+    this.requireActive();
     const data = this.store.get<string>('spotifyTokens'); if (!data) throw new AppError('Hubungkan akun Spotify terlebih dahulu.', 409);
     const tokens = decrypt<Tokens>(data, this.config.encryptionKey);
     if (tokens.expiresAt > Date.now() + 60000) return tokens.access_token;
@@ -36,8 +60,23 @@ export class Spotify {
   }
   async api(path: string, method = 'GET', body?: unknown, retried = false): Promise<any> {
     if (!path.startsWith('/') || path.startsWith('//')) throw new AppError('Endpoint Spotify tidak valid.');
-    const response = await fetch('https://api.spotify.com/v1' + path, { method, headers: { Authorization: `Bearer ${await this.token()}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10000) });
-    if (response.status === 401 && method === 'GET' && !retried) { const value = this.store.get<string>('spotifyTokens'); if (value) { const t = decrypt<Tokens>(value, this.config.encryptionKey); t.expiresAt = 0; this.store.set('spotifyTokens', encrypt(t, this.config.encryptionKey)); } return this.api(path, method, body, true); }
+    return this.request(path,method,body,await this.token(),method === 'GET' && !retried);
+  }
+  private async request(path: string, method: string, body: unknown, accessToken: string, retry = false): Promise<any> {
+    this.requireActive();
+    const response = await fetch('https://api.spotify.com/v1' + path, { method, headers: { Authorization: `Bearer ${accessToken}`, 'Content-Type': 'application/json' }, body: body === undefined ? undefined : JSON.stringify(body), signal: AbortSignal.timeout(10000) });
+    this.requireActive();
+    if (response.status === 401 && retry) {
+      const value = this.store.get<string>('spotifyTokens');
+      if (value) {
+        const tokens = decrypt<Tokens>(value,this.config.encryptionKey);
+        if (tokens.access_token === accessToken) {
+          tokens.expiresAt = 0;
+          this.store.set('spotifyTokens',encrypt(tokens,this.config.encryptionKey));
+        }
+      }
+      return this.api(path,method,body,true);
+    }
     if (!response.ok) { if (response.status === 429) { const error = new AppError('Batas request Spotify tercapai. Tunggu sebentar sebelum mencoba lagi.', 429); const retry = Number(response.headers.get('retry-after')); error.retryAfterMs = Number.isFinite(retry) && retry > 0 ? retry * 1000 : 30000; throw error; } if (response.status === 404) throw new AppError('Spotify tidak menemukan perangkat/lagu. Aktifkan player browser ini lalu coba lagi.', 409); if (response.status === 403) throw new AppError('Spotify menolak akses. Pastikan akun Premium dan diizinkan di Developer Dashboard.', 403); throw new AppError(`Spotify sedang tidak tersedia (HTTP ${response.status}). Command tidak diulang otomatis.`, 502); }
     if (response.status === 204) return null;
     const text = await response.text();

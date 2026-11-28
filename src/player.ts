@@ -12,16 +12,24 @@ function loadSDK() {
 export class BrowserPlayer {
   instance: any = null; timer: ReturnType<typeof setInterval> | null = null; deviceId = ''; claimed = false; startedDuringActivation = false;
   socket: () => WebSocket | null; connection: () => string; onError: (message: string) => void;
-  constructor(socket: () => WebSocket | null, connection: () => string, onError: (message: string) => void) { this.socket = socket; this.connection = connection; this.onError = onError; }
-  remember(playing?: boolean) { try { const previous = JSON.parse(sessionStorage.getItem('carubra-player') || '{}'); sessionStorage.setItem('carubra-player', JSON.stringify({ active: true, playing: playing ?? previous.playing ?? false })); } catch { /* Storage may be unavailable in private browsers. */ } }
-  async restore() { let saved: { active?: boolean; playing?: boolean }; try { saved = JSON.parse(sessionStorage.getItem('carubra-player') || '{}'); } catch { return; } if (!saved.active) return; await this.activate(); if (saved.playing && !this.startedDuringActivation) { await api('/api/player/play', 'POST', {}); this.remember(true); } }
+  private disposed = false;
+  private storageKey: string;
+  constructor(socket: () => WebSocket | null, connection: () => string, onError: (message: string) => void, private roomId = 'default', userId?: string) {
+    this.socket = socket;
+    this.connection = connection;
+    this.onError = message => { if (!this.disposed) onError(message); };
+    this.storageKey = userId ? `carubra-player:${userId}:${roomId}` : 'carubra-player';
+  }
+  remember(playing?: boolean) { try { const previous = JSON.parse(sessionStorage.getItem(this.storageKey) || '{}'); sessionStorage.setItem(this.storageKey, JSON.stringify({ active: true, playing: playing ?? previous.playing ?? false })); } catch { /* Storage may be unavailable in private browsers. */ } }
+  async restore() { let saved: { active?: boolean; playing?: boolean }; try { saved = JSON.parse(sessionStorage.getItem(this.storageKey) || '{}'); } catch { return; } if (!saved.active || this.disposed) return; await this.activate(); if (!this.disposed && saved.playing && !this.startedDuringActivation) { await api('/api/player/play', 'POST', {}, this.roomId); this.remember(true); } }
   send(data: unknown) { const socket = this.socket(); if (socket?.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); }
   async activate(takeover = false) {
-    if (!window.isSecureContext) throw new Error('Player memerlukan HTTPS. Buka https://spotify.carubra.com.');
+    if (!window.isSecureContext) throw new Error('Player memerlukan koneksi HTTPS.');
     await loadSDK();
+    if (this.disposed) return;
     if (!this.connection()) throw new Error('Koneksi realtime belum siap. Tunggu sebentar.');
     if (!this.instance) {
-      this.instance = new window.Spotify.Player({ name: 'Ruang Musik · Carubra', volume: 0.7, getOAuthToken: (callback: (token: string) => void) => { void api('/api/spotify/token').then(data => callback(data.accessToken)).catch(error => this.onError(error.message)); } });
+      this.instance = new window.Spotify.Player({ name: 'Ruang Musik · Carubra', volume: 0.7, getOAuthToken: (callback: (token: string) => void) => { if (!this.disposed) void api('/api/spotify/token','GET',undefined,this.roomId).then(data => { if (!this.disposed) callback(data.accessToken); }).catch(error => this.onError(error.message)); } });
       for (const event of ['initialization_error', 'authentication_error', 'account_error', 'playback_error']) this.instance.addListener(event, ({ message }: { message: string }) => { this.onError(message); this.send({ type: 'player_error', message }); });
       this.instance.addListener('autoplay_failed', () => { const message = 'Browser meminta sentuhan. Tekan Aktifkan audio, lalu Putar.'; this.onError(message); this.send({ type: 'player_error', message, needsGesture: true }); });
       this.instance.addListener('not_ready', () => { this.claimed = false; this.onError('Player Spotify terputus. Aktifkan kembali.'); });
@@ -31,13 +39,18 @@ export class BrowserPlayer {
       this.instance.activateElement();
       const connected = await this.instance.connect(); if (!connected) throw new Error('Browser tidak dapat terhubung ke Spotify.'); await ready;
     } else this.instance.activateElement();
-    const claim = await api('/api/player/claim', 'POST', { connectionId: this.connection(), deviceId: this.deviceId, takeover }); this.startedDuringActivation = claim.started === true; this.claimed = true; this.remember();
-    if (this.timer) clearInterval(this.timer); this.timer = setInterval(() => { void this.instance.getCurrentState().then((s: any) => this.telemetry(s)); }, 3000);
+    if (this.disposed) return;
+    const claim = await api('/api/player/claim', 'POST', { connectionId: this.connection(), deviceId: this.deviceId, takeover }, this.roomId);
+    if (this.disposed) return;
+    this.startedDuringActivation = claim.started === true; this.claimed = true; this.remember();
+    if (this.timer) clearInterval(this.timer); this.timer = setInterval(() => { void this.instance?.getCurrentState().then((s: any) => this.telemetry(s)).catch(() => {}); }, 3000);
     const state = await this.instance.getCurrentState(); this.telemetry(state);
   }
   telemetry(state: any) { if (!this.claimed) return; if (!state) { this.send({type:'telemetry',data:{uri:'',paused:true,positionMs:0,durationMs:0}}); return; } this.remember(!state.paused); this.send({ type: 'telemetry', data: { uri: state.track_window?.current_track?.uri || '', paused: !!state.paused, positionMs: state.position || 0, durationMs: state.duration || 0 } }); }
   async volume(volume: number) { try { if (!this.instance || !this.claimed) throw new Error('Player tidak aktif.'); await this.instance.setVolume(volume / 100); const actual = await this.instance.getVolume(); if (Math.abs(actual - volume / 100) > 0.08) throw new Error('Kontrol volume tidak didukung browser ini.'); this.send({ type: 'volume_result', ok: true }); } catch { this.send({ type: 'volume_result', ok: false }); this.onError('Browser menolak volume. Gunakan tombol volume Android.'); } }
   async wakeAudio() { if (this.instance) this.instance.activateElement(); }
-  async release() { try { sessionStorage.removeItem('carubra-player'); } catch { /* Optional storage. */ } if (this.claimed && this.connection()) await api('/api/player/release', 'POST', { connectionId: this.connection() }); this.disconnect(); }
+  async release() { this.forget(); if (this.claimed && this.connection()) await api('/api/player/release', 'POST', { connectionId: this.connection() }, this.roomId); this.disconnect(); }
+  forget() { try { sessionStorage.removeItem(this.storageKey); } catch { /* Optional storage. */ } }
+  dispose() { this.disposed = true; this.disconnect(); }
   disconnect() { this.claimed = false; if (this.timer) clearInterval(this.timer); this.timer = null; this.instance?.disconnect(); this.instance = null; }
 }
