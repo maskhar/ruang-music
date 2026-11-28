@@ -15,18 +15,22 @@ import { Queue } from './queue.ts';
 import { SpotifyObserver } from './spotify-observer.ts';
 import { Notifications } from './notifications.ts';
 import { Identity, type Role, type User } from './identity.ts';
-import { verifyWahaMessage, type IncomingMessage } from './waha.ts';
+import { getWahaJoinInfo, inviteCodeFromUrl, joinWahaGroup, verifyWahaMessage, type IncomingMessage, type WahaJoinInfo, type WahaJoinStatus } from './waha.ts';
 import { equal, hash, secret } from './crypto.ts';
 import { AppError, type SongRequest } from './types.ts';
 import type { Config } from './config.ts';
 export function createApp(config: Config, provided?: Store, services: {
-  verifyPairingMessage?: (message: IncomingMessage) => Promise<boolean>
+  verifyPairingMessage?: (message: IncomingMessage) => Promise<boolean>;
+  getJoinInfo?: (code: string) => Promise<WahaJoinInfo>;
+  joinGroup?: (code: string, info: WahaJoinInfo) => Promise<WahaJoinStatus>;
 } = {}) {
   const store = provided || new Store(join(config.dataDir, 'player.sqlite')), spotify = new Spotify(config, store), queue = new Queue(store, spotify);
   const blockedGroups = new Set(['0@g.us', ...config.blockedGroupIds]);
   const bootstrapGroups = config.groupIds.filter(id => !blockedGroups.has(id));
   const identity = new Identity(provided ? ':memory:' : join(config.dataDir, 'identity.sqlite'), config.password, bootstrapGroups, config.wahaSession, config.encryptionKey);
   const verifyPairingMessage = services.verifyPairingMessage ?? (message => verifyWahaMessage(config,message));
+  const getJoinInfo = services.getJoinInfo ?? (code => getWahaJoinInfo(config,code));
+  const joinGroup = services.joinGroup ?? ((code,info) => joinWahaGroup(config,code,info));
   const verifyBoundMessages = !!(services.verifyPairingMessage || (config.wahaUrl && config.wahaKey));
   const notificationsFor = (roomId: string, roomStore: Store) => new Notifications(roomStore, config, groupId =>
     !blockedGroups.has(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
@@ -34,6 +38,8 @@ export function createApp(config: Config, provided?: Store, services: {
   type Runtime = { id: string; name: string; store: Store; spotify: Spotify; queue: Queue; notifications: Notifications; observer: SpotifyObserver; integrationSerial?: Promise<void>; notificationTask?: Promise<void> };
   const runtimes = new Map<string, Runtime>();
   const retiringRooms = new Set<string>();
+  const joiningRooms = new Set<string>();
+  const joiningGroups = new Set<string>();
   function requireActiveRoom(id: string) {
     if (retiringRooms.has(id) || !identity.isActiveRoom(id)) throw new AppError('Ruang sudah dihapus atau sedang dihapus.',403);
   }
@@ -101,6 +107,7 @@ export function createApp(config: Config, provided?: Store, services: {
   app.delete('/api/rooms/:id', auth, async (req,res) => {
     const user = userFor(req), id = String(req.params.id);
     identity.require(user,id,['owner']);
+    if (joiningRooms.has(id)) throw new AppError('Tunggu sampai proses bergabung ke WhatsApp selesai.',409);
     const rt = runtime(id);
     retiringRooms.add(id);
     try {
@@ -173,13 +180,50 @@ export function createApp(config: Config, provided?: Store, services: {
     const verification = identity.regenerateVerificationCode(userFor(req),String(req.params.id));
     res.status(201).json({code:verification.code,expiresAt:verification.expires});
   });
+  const joinLimit = rateLimit({
+    windowMs:10 * 60_000,
+    limit:8,
+    keyGenerator:req => userFor(req).id,
+    legacyHeaders:false,
+    message:{error:'Terlalu banyak percobaan bergabung. Coba lagi nanti.'}
+  });
+  const validateJoin: express.RequestHandler = (req,res,next) => {
+    const roomId = String(req.params.id);
+    requireUnpairedRoom(req,roomId);
+    const inviteUrl = z.string().trim().min(1).max(512).parse(req.body?.inviteUrl);
+    res.locals.joinCode = inviteCodeFromUrl(inviteUrl);
+    next();
+  };
+  function requireUnpairedRoom(req: express.Request, roomId: string) {
+    requireActiveRoom(roomId);
+    identity.require(userFor(req),roomId,controllers);
+    if (identity.groupsForRoom(roomId,config.wahaSession).length) throw new AppError('Lepaskan grup WhatsApp yang terhubung sebelum menggantinya.',409);
+  }
+  app.post('/api/rooms/:id/whatsapp/join',auth,validateJoin,joinLimit,async (req,res) => {
+    const roomId = String(req.params.id), code = res.locals.joinCode as string;
+    if (joiningRooms.has(roomId)) throw new AppError('Proses bergabung untuk ruang ini masih berjalan.',409);
+    joiningRooms.add(roomId);
+    try {
+      const info = await getJoinInfo(code);
+      requireUnpairedRoom(req,roomId);
+      if (blockedGroups.has(info.groupId)) throw new AppError('Grup ini tidak tersedia untuk ruang development.',403);
+      if (identity.roomForGroup(info.groupId,config.wahaSession)) throw new AppError('Grup ini sudah terhubung ke ruang lain.',409);
+      if (joiningGroups.has(info.groupId)) throw new AppError('Carubra sedang memproses undangan untuk grup ini.',409);
+      joiningGroups.add(info.groupId);
+      try {
+        const status = await joinGroup(code,info);
+        requireUnpairedRoom(req,roomId);
+        res.json({status,groupName:info.groupName});
+      } finally { joiningGroups.delete(info.groupId); }
+    } finally { joiningRooms.delete(roomId); }
+  });
   app.delete('/api/rooms/:id/groups/:groupId', auth, (req,res) => {
     requireActiveRoom(String(req.params.id));
     identity.unbindGroup(userFor(req),String(req.params.id),String(req.params.groupId));
     res.json({ok:true});
   });
   const publicRequest = (r: SongRequest | null) => { if (!r) return null; const { senderId: _sender, messageId: _message, groupId: _group, ...publicData } = r; return publicData; };
-  const snapshot = (rt: Runtime) => ({ roomId:rt.id, current: publicRequest(rt.queue.current()), queue: rt.store.list('queued', 500).map(publicRequest), history: rt.store.list(undefined, 20).map(publicRequest), playback: rt.queue.playback, spotifyPlayback: rt.observer.state, notificationsFailed: Number((rt.store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: rt.spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!config.wahaKey, callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
+  const snapshot = (rt: Runtime) => ({ roomId:rt.id, current: publicRequest(rt.queue.current()), queue: rt.store.list('queued', 500).map(publicRequest), history: rt.store.list(undefined, 20).map(publicRequest), playback: rt.queue.playback, spotifyPlayback: rt.observer.state, notificationsFailed: Number((rt.store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: rt.spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!(config.wahaKey && config.wahaUrl), callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
   const broadcast = (rt: Runtime) => {
     if (retiringRooms.has(rt.id) || !runtimes.has(rt.id)) return;
     const roomClients = [...clients.values()].filter(client => client.roomId === rt.id &&
@@ -343,7 +387,13 @@ export function createApp(config: Config, provided?: Store, services: {
       let reply: string;
       let commandFailed = false;
       try {
-        const result = identity.consumeVerification(body.groupId,body.session,(pairing[1] || '').trim().toLowerCase(),id=>!retiringRooms.has(id));
+        const result = identity.consumeVerification(body.groupId,body.session,(pairing[1] || '').trim().toLowerCase(),
+          id=>{
+            if (joiningRooms.has(id) || joiningGroups.has(body.groupId)) {
+              throw new AppError('Tunggu sampai proses bergabung selesai, lalu kirim ulang /hubungkan.',409);
+            }
+            return !retiringRooms.has(id);
+          });
         const rt = runtime(result.roomId);
         const roomUrl = config.origin + '/?room=' + result.roomId;
         const spotifyStatus = rt.spotify.connected

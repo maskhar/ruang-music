@@ -143,8 +143,8 @@ Hubungkan akun Spotify Premium berbeda untuk setiap ruang yang akan memutar bers
 
 Untuk memasangkan grup pengujian:
 
-1. Tambahkan nomor WhatsApp Carubra ke grup.
-2. Buat ruang dan buka **Pengaturan**. Salin perintah `/hubungkan KODE` lalu kirim ke grup tersebut. Kode berlaku 10 menit dan sekali pakai. Setelah kedaluwarsa, buat kode baru dari Pengaturan.
+1. Buat ruang dan buka **Pengaturan**. Tempel tautan grup `https://chat.whatsapp.com/…`, lalu pilih **Gabungkan Carubra**. Jika WhatsApp meminta persetujuan, admin grup perlu menyetujui permintaan masuk. Menambahkan nomor Carubra secara manual juga tetap tersedia.
+2. Setelah Carubra masuk, salin perintah `/hubungkan KODE` lalu kirim dari grup tersebut. Kode berlaku 10 menit dan sekali pakai. Setelah kedaluwarsa, buat kode baru dari Pengaturan.
 3. Bot memeriksa pesan melalui WAHA, lalu mengonfirmasi nama ruang dan status Spotify di grup. Jika Spotify belum terhubung, hubungkan akun Premium dari Pengaturan. Bot mengirim kabar saat Spotify berhasil terhubung. Aktifkan browser player pada perangkat yang mengeluarkan suara.
 
 Satu grup hanya dapat dipasangkan ke satu ruang. Pemilik perlu melepas grup dari ruang asal sebelum memasangkannya ke ruang baru. Antrean dan riwayat tetap tersimpan di ruang asal. Workflow n8n development yang sama meneruskan command semua ruang, termasuk pairing, ke aplikasi.
