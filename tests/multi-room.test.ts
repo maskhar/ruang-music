@@ -61,6 +61,30 @@ test('identitas, keanggotaan, grup, dan akun Spotify terisolasi per ruang', () =
   } finally { identity.close(); rmSync(folder, { recursive: true, force: true }); }
 });
 
+test('admin sistem mengelola akun dan akses; password/status memutus sesi; anggota ditolak',()=>{
+  const identity=new Identity(':memory:','admin-password-long-enough',[],'carubra');
+  try{
+    const admin=identity.login('owner@local','admin-password-long-enough');
+    const room=identity.createRoom(admin.user,'Ruang user');
+    const id=identity.createUser(admin.user,'new@example.test','Pengguna Baru','initial-password-long',room,'operator');
+    const login=identity.login('new@example.test','initial-password-long');
+    assert.equal(identity.session(login.token)?.id,id);
+    assert.equal(identity.users(admin.user).find(user=>user.id===id)?.rooms[0].role,'operator');
+    const member=identity.session(login.token)!;
+    assert.throws(()=>identity.users(member),(error:unknown)=>error instanceof AppError&&error.status===403);
+    identity.setUserRoom(admin.user,id,room,'member');
+    assert.equal(identity.session(login.token),null);
+    const next=identity.login('new@example.test','initial-password-long');
+    identity.updateUser(admin.user,id,{password:'replacement-password-long'});
+    assert.equal(identity.session(next.token),null);
+    assert.throws(()=>identity.login('new@example.test','initial-password-long'));
+    const replacement=identity.login('new@example.test','replacement-password-long');
+    identity.updateUser(admin.user,id,{disabled:true});
+    assert.equal(identity.session(replacement.token),null);
+    assert.throws(()=>identity.login('new@example.test','replacement-password-long'));
+  }finally{identity.close();}
+});
+
 test('OAuth Spotify menolak akun sama lintas ruang tanpa mengganti token lama', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'ruang-oauth-'));
   const config = loadConfig({ ADMIN_PASSWORD: 'admin-password-long-enough', ENCRYPTION_KEY: 'a'.repeat(64), APP_ORIGIN: 'http://127.0.0.1:3210', DATA_DIR: folder, SPOTIFY_CLIENT_ID: 'test-client-id' });

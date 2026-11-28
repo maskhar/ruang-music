@@ -39,10 +39,12 @@ export class Identity {
       CREATE INDEX IF NOT EXISTS room_groups_room ON room_groups(room_id);`);
     const roomColumns = this.db.prepare('PRAGMA table_info(rooms)').all() as {name:string}[];
     if (!roomColumns.some(column => column.name === 'deleted_at')) this.db.exec('ALTER TABLE rooms ADD COLUMN deleted_at INTEGER');
+    const userColumns = this.db.prepare('PRAGMA table_info(users)').all() as {name:string}[];
+    if (!userColumns.some(column => column.name === 'disabled_at')) this.db.exec('ALTER TABLE users ADD COLUMN disabled_at INTEGER');
     if (!(this.db.prepare('SELECT 1 FROM users LIMIT 1').get())) {
       const adminId = randomUUID();
       this.transaction(() => {
-        this.db.prepare('INSERT INTO users VALUES(?,?,?,?,?,?)').run(adminId, 'owner@local', 'Pemilik', passwordHash(secret()), 1, Date.now());
+        this.db.prepare('INSERT INTO users(id,email,name,password_hash,admin,created_at) VALUES(?,?,?,?,?,?)').run(adminId, 'owner@local', 'Pemilik', passwordHash(secret()), 1, Date.now());
         this.db.prepare('INSERT INTO rooms(id,name,owner_id,created_at) VALUES(?,?,?,?)').run('default', 'Ruang utama', adminId, Date.now());
         this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run('default', adminId, 'owner');
         for (const group of defaultGroups.filter(group => group !== '0@g.us')) this.db.prepare('INSERT INTO room_groups VALUES(?,?,?)').run(group, 'default', session);
@@ -53,7 +55,7 @@ export class Identity {
     const row = this.db.prepare('SELECT * FROM users WHERE email=?').get(email.toLowerCase()) as any;
     const valid = row?.admin ? verifyPassword(password, passwordHash(this.bootstrapPassword, 'ruang-musik-admin')) :
       verifyPassword(password, row?.password_hash || 'unknown:' + '0'.repeat(128));
-    if (!row || !valid) throw new AppError('Email atau password salah.', 401);
+    if (!row || !valid || row.disabled_at) throw new AppError('Email atau password salah.', 401);
     const token = secret();
     this.db.prepare('DELETE FROM sessions WHERE expires<?').run(Date.now());
     this.db.prepare('INSERT INTO sessions VALUES(?,?,?)').run(hash(token), row.id, Date.now() + 7 * 86400000);
@@ -67,10 +69,49 @@ export class Identity {
   publicUser(row: any): User { return { id: row.id, email: row.email, name: row.name, admin: !!row.admin }; }
   session(token: string): User | null {
     if (!token) return null;
-    const row = this.db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.hash=? AND s.expires>?').get(hash(token), Date.now());
+    const row = this.db.prepare('SELECT u.* FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.hash=? AND s.expires>? AND u.disabled_at IS NULL').get(hash(token), Date.now());
     return row ? this.publicUser(row) : null;
   }
   logout(token: string) { this.db.prepare('DELETE FROM sessions WHERE hash=?').run(hash(token)); }
+  private requireAdmin(actor: User) { if (!actor.admin) throw new AppError('Hanya admin sistem yang dapat mengelola pengguna.',403); }
+  users(actor: User) {
+    this.requireAdmin(actor);
+    const rows = this.db.prepare('SELECT id,email,name,admin,disabled_at FROM users ORDER BY admin DESC,name COLLATE NOCASE').all() as {id:string;email:string;name:string;admin:number;disabled_at:number|null}[];
+    const memberships = this.db.prepare(`SELECT m.user_id userId,m.room_id roomId,r.name roomName,m.role FROM room_members m JOIN rooms r ON r.id=m.room_id WHERE r.deleted_at IS NULL ORDER BY r.name`).all() as {userId:string;roomId:string;roomName:string;role:Role}[];
+    return rows.map(row => ({id:row.id,email:row.email,name:row.name,admin:!!row.admin,disabled:!!row.disabled_at,rooms:memberships.filter(member=>member.userId===row.id).map(({roomId,roomName,role})=>({roomId,roomName,role}))}));
+  }
+  createUser(actor: User, email: string, name: string, password: string, roomId: string, role: Exclude<Role,'owner'>) {
+    this.requireAdmin(actor);
+    return this.transaction(() => {
+      if (!this.isActiveRoom(roomId)) throw new AppError('Ruang tidak ditemukan.',404);
+      if (this.db.prepare('SELECT 1 FROM users WHERE email=?').get(email)) throw new AppError('Email sudah terdaftar.',409);
+      const id=randomUUID();
+      this.db.prepare('INSERT INTO users(id,email,name,password_hash,admin,created_at) VALUES(?,?,?,?,0,?)').run(id,email,name,passwordHash(password),Date.now());
+      this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(roomId,id,role);
+      return id;
+    });
+  }
+  updateUser(actor: User, id: string, input: {name?:string;email?:string;password?:string;disabled?:boolean}) {
+    this.requireAdmin(actor);
+    const target=this.db.prepare('SELECT * FROM users WHERE id=?').get(id) as any;
+    if (!target) throw new AppError('Pengguna tidak ditemukan.',404);
+    if (target.admin && (input.password !== undefined || input.disabled !== undefined)) throw new AppError('Password dan status admin utama dikelola melalui konfigurasi server.',409);
+    if (id===actor.id && input.disabled) throw new AppError('Tidak dapat menonaktifkan akun sendiri.',409);
+    try {
+      this.transaction(() => {
+        this.db.prepare('UPDATE users SET name=?,email=?,password_hash=?,disabled_at=? WHERE id=?').run(input.name??target.name,input.email??target.email,input.password===undefined?target.password_hash:passwordHash(input.password),input.disabled===undefined?target.disabled_at:input.disabled?Date.now():null,id);
+        if (input.password!==undefined || input.disabled===true) this.db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+      });
+    } catch (error) { if (String(error).includes('UNIQUE constraint')) throw new AppError('Email sudah terdaftar.',409); throw error; }
+  }
+  setUserRoom(actor: User, id:string, roomId:string, role:Exclude<Role,'owner'>|null) {
+    this.requireAdmin(actor);
+    if (!this.db.prepare('SELECT 1 FROM users WHERE id=? AND admin=0').get(id)) throw new AppError('Akses admin utama tidak dapat diubah.',409);
+    if (!this.isActiveRoom(roomId)) throw new AppError('Ruang tidak ditemukan.',404);
+    if (role) this.addMember(actor,roomId,id,role);
+    else this.removeMember(actor,roomId,id);
+    this.db.prepare('DELETE FROM sessions WHERE user_id=?').run(id);
+  }
   rooms(user: User): Room[] {
     return this.db.prepare(`SELECT r.id,r.name,u.name ownerName,CASE WHEN ?=1 THEN 'owner' ELSE m.role END role,
       (SELECT group_id FROM room_groups WHERE room_id=r.id ORDER BY group_id LIMIT 1) groupId
@@ -185,7 +226,7 @@ export class Identity {
         throw new AppError('Email sudah punya akun. Minta pemilik menambahkan akun yang sudah ada.',409);
       }
       const id = randomUUID();
-      this.db.prepare('INSERT INTO users VALUES(?,?,?,?,?,?)').run(id,invite.email,invite.name,passwordHash(password),0,Date.now());
+      this.db.prepare('INSERT INTO users(id,email,name,password_hash,admin,created_at) VALUES(?,?,?,?,?,?)').run(id,invite.email,invite.name,passwordHash(password),0,Date.now());
       this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(invite.room_id,id,invite.role);
       this.db.prepare('DELETE FROM invitations WHERE hash=?').run(hash(token));
       return invite.email;

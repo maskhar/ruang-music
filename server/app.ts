@@ -112,6 +112,19 @@ export function createApp(config: Config, provided?: Store, services: {
     res.clearCookie('carubra_session', { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, path: '/' }).json({ ok: true });
   });
   app.get('/api/rooms', auth, (req, res) => res.json({ rooms: roomCards(userFor(req)) }));
+  app.get('/api/admin/users', auth, (req,res) => res.json({users:identity.users(userFor(req))}));
+  app.post('/api/admin/users', auth, (req,res) => {
+    const body=z.object({email:z.email().max(254).transform(value=>value.toLowerCase()),name:z.string().trim().min(1).max(60),password:z.string().min(12).max(256),roomId:z.string().min(1),role:z.enum(['operator','member'])}).parse(req.body);
+    res.status(201).json({id:identity.createUser(userFor(req),body.email,body.name,body.password,body.roomId,body.role)});
+  });
+  app.patch('/api/admin/users/:id',auth,(req,res)=>{
+    const body=z.object({email:z.email().max(254).transform(value=>value.toLowerCase()).optional(),name:z.string().trim().min(1).max(60).optional(),password:z.string().min(12).max(256).optional(),disabled:z.boolean().optional()}).strict().parse(req.body);
+    identity.updateUser(userFor(req),String(req.params.id),body);res.json({ok:true});
+  });
+  app.put('/api/admin/users/:id/rooms/:roomId',auth,(req,res)=>{
+    const body=z.object({role:z.enum(['operator','member']).nullable()}).parse(req.body);
+    identity.setUserRoom(userFor(req),String(req.params.id),String(req.params.roomId),body.role);res.json({ok:true});
+  });
   app.post('/api/rooms', auth, (req, res) => { const name = z.string().trim().min(2).max(80).regex(/^[^\r\n]+$/).parse(req.body.name); const id = identity.createRoom(userFor(req),name); res.status(201).json({id,name}); });
   app.delete('/api/rooms/:id', auth, async (req,res) => {
     const user = userFor(req), id = String(req.params.id);
