@@ -150,3 +150,5 @@ Untuk memasangkan grup pengujian:
 Satu grup hanya dapat dipasangkan ke satu ruang. Pemilik perlu melepas grup dari ruang asal sebelum memasangkannya ke ruang baru. Antrean dan riwayat tetap tersimpan di ruang asal. Workflow n8n development yang sama meneruskan command semua ruang, termasuk pairing, ke aplikasi.
 
 Database `player.sqlite` lama tetap dipakai oleh Ruang utama, termasuk antrean dan koneksi Spotify yang sudah tersimpan. `identity.sqlite` menyimpan akun dan keanggotaan. Ruang baru memiliki database sendiri di `rooms/`. Gunakan `scripts/backup.ps1` untuk mencadangkan ketiganya.
+
+Pemilik atau admin bisa menghapus ruang dari kartu dashboard. Penghapusan mencabut akses, undangan, player, koneksi Spotify, dan ikatan WhatsApp untuk ruang tersebut. Antrean dan riwayat disimpan di SQLite sebagai arsip pemulihan; ruang yang dihapus tidak kembali setelah restart.

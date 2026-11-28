@@ -1,0 +1,102 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {mkdtempSync,rmSync,existsSync} from 'node:fs';
+import {tmpdir} from 'node:os';
+import {join} from 'node:path';
+import {createApp} from '../server/app.ts';
+import {loadConfig} from '../server/config.ts';
+import WebSocket from 'ws';
+
+test('hapus ruang menolak anggota/operator, mencabut akses dan grup, serta bertahan setelah restart',async()=>{
+ const folder=mkdtempSync(join(tmpdir(),'ruang-delete-'));
+ const group='120363500000000123@g.us';
+ const config=loadConfig({ADMIN_PASSWORD:'password-long-enough',ENCRYPTION_KEY:'a'.repeat(64),APP_ORIGIN:'http://127.0.0.1:3210',DATA_DIR:folder,SPOTIFY_CLIENT_ID:'mock-client',INTEGRATION_TOKEN:'mock-integration-token',WAHA_SESSION:'carubra'});
+ let app=createApp(config,undefined,{verifyPairingMessage:async()=>true});
+ let base='';
+ const listen=async()=>{
+  await new Promise<void>(resolve=>app.server.listen(0,'127.0.0.1',resolve));
+  base=`http://127.0.0.1:${(app.server.address() as {port:number}).port}`;
+ };
+ const request=async(path:string,method='GET',body?:unknown,cookie='',roomId='default')=>fetch(base+path,{method,headers:{Origin:config.origin,Cookie:cookie,'X-Room-Id':roomId,'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body),redirect:'manual'});
+ const login=async(email:string,password:string)=>{
+  const response=await request('/api/login','POST',{email,password});assert.equal(response.status,200);
+  return response.headers.get('set-cookie')!.split(';')[0];
+ };
+ const groupCommand=(text:string,id:string)=>fetch(base+'/api/integrations/whatsapp',{method:'POST',headers:{Authorization:'Bearer '+config.integrationToken,'Content-Type':'application/json'},body:JSON.stringify({groupId:group,session:'carubra',senderId:'628123@c.us',messageId:id,text})});
+ try {
+  await listen();
+  const admin=await login('owner@local',config.password);
+  const makeRoom=async(name:string)=>{
+   const response=await request('/api/rooms','POST',{name},admin);assert.equal(response.status,201);
+   return (await response.json() as {id:string}).id;
+  };
+  const victim=await makeRoom('Ruang terhapus');
+  const safe=await makeRoom('Ruang tetap');
+  const invite=async(role:'member'|'operator',email:string)=>{
+   const response=await request(`/api/rooms/${victim}/members`,'POST',{email,name:role,role},admin);
+   assert.equal(response.status,201);
+   const link=(await response.json() as {inviteUrl:string}).inviteUrl;
+   const token=new URL(link).searchParams.get('invite');
+   assert.ok(token);
+   assert.equal((await request('/api/invitations/accept','POST',{token,password:'guest-password-long-enough'})).status,200);
+   return login(email,'guest-password-long-enough');
+  };
+  const member=await invite('member','member@delete.test');
+  const operator=await invite('operator','operator@delete.test');
+  assert.equal((await request(`/api/rooms/${victim}`,'DELETE',undefined,member)).status,403);
+  assert.equal((await request(`/api/rooms/${victim}`,'DELETE',undefined,operator)).status,403);
+  assert.equal((await request('/api/state','GET',undefined,admin,victim)).status,200);
+  const activeSocket=new WebSocket(base.replace('http://','ws://')+'/ws?roomId='+victim,{headers:{Origin:config.origin,Cookie:admin}});
+  await new Promise<void>((resolve,reject)=>{activeSocket.once('open',resolve);activeSocket.once('error',reject);});
+  const closed=new Promise<number>((resolve,reject)=>{activeSocket.once('close',code=>resolve(code));activeSocket.once('error',reject);});
+  const pairing=await request(`/api/rooms/${victim}/pairing`,'GET',undefined,admin);
+  assert.equal(pairing.status,200);
+  const code=(await pairing.json() as {code:string}).code;
+  assert.ok(code);
+  assert.equal((await groupCommand('/hubungkan '+code,'pair-before-delete')).status,200);
+  assert.equal((await groupCommand('/queue','queue-before-delete')).status,200);
+  const oauth=await request('/auth/spotify?room='+victim,'GET',undefined,admin);
+  assert.equal(oauth.status,302);
+  const state=new URL(oauth.headers.get('location')!).searchParams.get('state');assert.ok(state);
+  assert.equal((await request(`/api/rooms/${victim}`,'DELETE',undefined,admin)).status,200);
+  assert.equal(await closed,1008,'WebSocket room terhapus harus diputus');
+  const rooms=(await (await request('/api/rooms','GET',undefined,admin)).json() as {rooms:{id:string}[]}).rooms;
+  assert.deepEqual(rooms.map(room=>room.id),['default',safe]);
+  for(const cookie of [admin,member,operator]) assert.equal((await request('/api/state','GET',undefined,cookie,victim)).status,403);
+  const deniedSocket=await new Promise<number>((resolve,reject)=>{
+   const socket=new WebSocket(base.replace('http://','ws://')+'/ws?roomId='+victim,{headers:{Origin:config.origin,Cookie:admin}});
+   socket.once('unexpected-response',(_request,response)=>{response.resume();resolve(response.statusCode||0)});
+   socket.once('open',()=>{socket.close();reject(new Error('Room terhapus masih bisa membuka WebSocket.'))});
+   socket.once('error',reject);
+  });
+  assert.equal(deniedSocket,401);
+  assert.equal((await request('/api/requests','POST',{input:'lagu baru'},admin,victim)).status,403);
+  assert.equal((await request(`/api/rooms/${victim}/pairing`,'GET',undefined,admin)).status,403);
+  assert.equal((await request('/auth/spotify?room='+victim,'GET',undefined,admin)).status,403);
+  assert.notEqual((await request('/auth/spotify/callback?state='+encodeURIComponent(state)+'&code=mock-code','GET',undefined,admin)).status,302);
+  assert.equal((await groupCommand('/queue','queue-after-delete')).status,403);
+  assert.equal((await request('/api/state','GET',undefined,admin,safe)).status,200);
+  const archive=join(folder,'rooms',victim+'.sqlite');
+  assert.equal(existsSync(archive),true,'SQLite ruang tetap tersedia untuk pemulihan');
+  app.close();
+  app=createApp(config,undefined,{verifyPairingMessage:async()=>true});
+  await listen();
+  const again=await login('owner@local',config.password);
+  assert.deepEqual(((await (await request('/api/rooms','GET',undefined,again)).json()) as {rooms:{id:string}[]}).rooms.map(room=>room.id),['default',safe]);
+  assert.equal((await request('/api/state','GET',undefined,again,victim)).status,403);
+  assert.equal((await request('/api/state','GET',undefined,again,safe)).status,200);
+  assert.equal((await groupCommand('/queue','queue-after-restart')).status,403);
+  assert.equal(existsSync(archive),true);
+  assert.equal((await request('/api/rooms/default','DELETE',undefined,again)).status,200);
+  assert.deepEqual(((await (await request('/api/rooms','GET',undefined,again)).json()) as {rooms:{id:string}[]}).rooms.map(room=>room.id),[safe]);
+  assert.equal((await request('/api/state','GET',undefined,again,'default')).status,403);
+  app.close();
+  app=createApp(config,undefined,{verifyPairingMessage:async()=>true});
+  await listen();
+  const finalLogin=await login('owner@local',config.password);
+  assert.deepEqual(((await (await request('/api/rooms','GET',undefined,finalLogin)).json()) as {rooms:{id:string}[]}).rooms.map(room=>room.id),[safe]);
+  assert.equal((await request('/api/state','GET',undefined,finalLogin,'default')).status,403);
+  assert.equal((await request('/api/state','GET',undefined,finalLogin,safe)).status,200);
+  assert.equal(existsSync(join(folder,'player.sqlite')),true,'Arsip SQLite ruang utama tidak dihapus');
+ } finally {app.close();rmSync(folder,{recursive:true,force:true});}
+});

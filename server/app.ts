@@ -31,11 +31,17 @@ export function createApp(config: Config, provided?: Store, services: {
   const notificationsFor = (roomId: string, roomStore: Store) => new Notifications(roomStore, config, groupId =>
     !blockedGroups.has(groupId) && identity.roomForGroup(groupId, config.wahaSession) === roomId);
   const notifications = notificationsFor('default', store);
-  type Runtime = { id: string; name: string; store: Store; spotify: Spotify; queue: Queue; notifications: Notifications; observer: SpotifyObserver; integrationSerial?: Promise<void> };
+  type Runtime = { id: string; name: string; store: Store; spotify: Spotify; queue: Queue; notifications: Notifications; observer: SpotifyObserver; integrationSerial?: Promise<void>; notificationTask?: Promise<void> };
   const runtimes = new Map<string, Runtime>();
+  const retiringRooms = new Set<string>();
+  function requireActiveRoom(id: string) {
+    if (retiringRooms.has(id) || !identity.isActiveRoom(id)) throw new AppError('Ruang sudah dihapus atau sedang dihapus.',403);
+  }
   const initial: Runtime = { id: 'default', name: 'Ruang utama', store, spotify, queue, notifications, observer: new SpotifyObserver(spotify) };
-  runtimes.set('default', initial);
+  if (identity.isActiveRoom('default')) runtimes.set('default',initial);
+  else spotify.retire();
   const runtime = (id: string): Runtime => {
+    requireActiveRoom(id);
     let value = runtimes.get(id);
     if (!value) {
       const room = identity.db.prepare('SELECT name FROM rooms WHERE id=?').get(id) as {name:string}|undefined;
@@ -45,7 +51,9 @@ export function createApp(config: Config, provided?: Store, services: {
       value = { id, name:room.name, store: roomStore, spotify: roomSpotify, queue: roomQueue, observer: new SpotifyObserver(roomSpotify), notifications: notificationsFor(id, roomStore) };
       runtimes.set(id, value);
       value.queue.on('change', () => broadcast(value!));
-      value.observer.on('change', () => { void value!.queue.reconcile(value!.observer.state).then(() => broadcast(value!)).catch(() => {}); });
+      value.observer.on('change', () => {
+        if (!retiringRooms.has(id)) void value!.queue.reconcile(value!.observer.state).then(() => broadcast(value!)).catch(() => {});
+      });
     }
     return value;
   };
@@ -54,7 +62,7 @@ export function createApp(config: Config, provided?: Store, services: {
   const clients = new Map<string, { socket: WebSocket; token: string; roomId: string }>();
   const controllers: Role[] = ['owner','operator'];
   const roomCards = (user: User) => identity.rooms(user).map(room => {
-    const rt = runtime(room.id);
+    const rt = runtimes.get(room.id) ?? runtime(room.id);
     const playback = rt.queue.playback;
     const playerConnected = !!rt.queue.lease && Date.now() - rt.queue.lease.updatedAt <= 30000;
     const current = rt.queue.current();
@@ -83,17 +91,58 @@ export function createApp(config: Config, provided?: Store, services: {
     const token = req.cookies.carubra_session;
     identity.logout(token);
     for (const [id, client] of clients) if (client.token === token) {
-      runtime(client.roomId).queue.release(id);
+      runtimes.get(client.roomId)?.queue.release(id);
       client.socket.close(1008, 'Signed out');
     }
     res.clearCookie('carubra_session', { httpOnly: true, sameSite: 'lax', secure: config.cookieSecure, path: '/' }).json({ ok: true });
   });
   app.get('/api/rooms', auth, (req, res) => res.json({ rooms: roomCards(userFor(req)) }));
   app.post('/api/rooms', auth, (req, res) => { const name = z.string().trim().min(2).max(80).regex(/^[^\r\n]+$/).parse(req.body.name); const id = identity.createRoom(userFor(req),name); res.status(201).json({id,name}); });
+  app.delete('/api/rooms/:id', auth, async (req,res) => {
+    const user = userFor(req), id = String(req.params.id);
+    identity.require(user,id,['owner']);
+    const rt = runtime(id);
+    retiringRooms.add(id);
+    try {
+      await rt.integrationSerial;
+      await rt.queue.run(async () => {
+        const lease = rt.queue.lease;
+        if (!lease || Date.now() - lease.updatedAt > 30000) return;
+        // Target only the SDK device that belongs to this room.
+        await rt.spotify.api('/me/player/pause?device_id=' + encodeURIComponent(lease.deviceId),'PUT').catch(() => {});
+      });
+      await rt.notificationTask;
+      identity.deleteRoom(user,id);
+      rt.observer.stop();
+      rt.spotify.retire();
+      for (const [connectionId,client] of clients) {
+        if (client.roomId !== id) continue;
+        if (client.socket.readyState === WebSocket.OPEN) client.socket.send(JSON.stringify({type:'room_deleted'}));
+        client.socket.close(1008,'Ruang dihapus');
+        rt.queue.release(connectionId);
+        clients.delete(connectionId);
+      }
+      runtimes.delete(id);
+      // SQLite data stays in place as an archive. The default store still serves legacy receipt deduplication.
+      rt.queue.removeAllListeners();
+      try {
+        rt.store.transaction(() => {
+          rt.store.db.exec("DELETE FROM oauth; DELETE FROM meta WHERE key IN ('spotifyTokens','spotifyAccount');");
+        });
+      } catch {
+        console.error('Ruang sudah dihapus, tetapi pembersihan Spotify di arsip SQLite gagal.');
+      } finally {
+        if (id !== 'default') rt.store.close();
+      }
+      res.json({ok:true});
+    } finally { retiringRooms.delete(id); }
+  });
   app.get('/api/rooms/:id/members', auth, (req,res) => {
+    requireActiveRoom(String(req.params.id));
     res.json({members:identity.members(userFor(req),String(req.params.id))});
   });
   app.post('/api/rooms/:id/members', auth, (req,res) => {
+    requireActiveRoom(String(req.params.id));
     const body = z.object({ email:z.string().trim().email().max(254), name:z.string().trim().min(1).max(60), role:z.enum(['operator','member']) }).parse(req.body);
     const token = identity.invite(userFor(req),String(req.params.id),body.email.toLowerCase(),body.name,body.role);
     res.status(201).json({ inviteUrl: token ? config.origin + '/?invite=' + token : null });
@@ -105,6 +154,7 @@ export function createApp(config: Config, provided?: Store, services: {
   });
   app.delete('/api/rooms/:id/members/:userId', auth, (req,res) => {
     const roomId = String(req.params.id), userId = String(req.params.userId);
+    requireActiveRoom(roomId);
     identity.removeMember(userFor(req),roomId,userId);
     for (const [id,client] of clients) {
       if (client.roomId !== roomId || identity.session(client.token)?.id !== userId) continue;
@@ -114,20 +164,24 @@ export function createApp(config: Config, provided?: Store, services: {
     res.json({ok:true});
   });
   app.get('/api/rooms/:id/pairing', auth, (req,res) => {
+    requireActiveRoom(String(req.params.id));
     const verification = identity.verificationCode(userFor(req),String(req.params.id));
     res.json({code:verification?.code ?? null,expiresAt:verification?.expires ?? null});
   });
   app.post('/api/rooms/:id/pairing', auth, (req,res) => {
+    requireActiveRoom(String(req.params.id));
     const verification = identity.regenerateVerificationCode(userFor(req),String(req.params.id));
     res.status(201).json({code:verification.code,expiresAt:verification.expires});
   });
   app.delete('/api/rooms/:id/groups/:groupId', auth, (req,res) => {
+    requireActiveRoom(String(req.params.id));
     identity.unbindGroup(userFor(req),String(req.params.id),String(req.params.groupId));
     res.json({ok:true});
   });
   const publicRequest = (r: SongRequest | null) => { if (!r) return null; const { senderId: _sender, messageId: _message, groupId: _group, ...publicData } = r; return publicData; };
   const snapshot = (rt: Runtime) => ({ roomId:rt.id, current: publicRequest(rt.queue.current()), queue: rt.store.list('queued', 500).map(publicRequest), history: rt.store.list(undefined, 20).map(publicRequest), playback: rt.queue.playback, spotifyPlayback: rt.observer.state, notificationsFailed: Number((rt.store.db.prepare("SELECT COUNT(*) AS count FROM outbox WHERE status IN ('failed','uncertain')").get() as any).count), spotifyConnected: rt.spotify.connected, spotifyConfigured: !!config.clientId, whatsappConfigured: !!config.wahaKey, callbackUrl: config.origin + '/auth/spotify/callback', origin: config.origin });
   const broadcast = (rt: Runtime) => {
+    if (retiringRooms.has(rt.id) || !runtimes.has(rt.id)) return;
     const roomClients = [...clients.values()].filter(client => client.roomId === rt.id &&
       client.socket.readyState === WebSocket.OPEN && validClient(client.token,rt.id));
     if (!roomClients.length) return;
@@ -135,8 +189,10 @@ export function createApp(config: Config, provided?: Store, services: {
     for (const client of roomClients) client.socket.send(message);
   };
   queue.on('change', () => broadcast(initial));
-  observer.on('change', () => { void queue.reconcile(observer.state).then(() => broadcast(initial)).catch(() => {}); });
-  app.get('/api/state', auth, async (req, res) => { const rt=roomFor(req); await rt.observer.refresh(); res.json(snapshot(rt)); });
+  observer.on('change', () => {
+    if (!retiringRooms.has('default')) void queue.reconcile(observer.state).then(() => broadcast(initial)).catch(() => {});
+  });
+  app.get('/api/state', auth, async (req, res) => { const rt=roomFor(req); await rt.observer.refresh(); roomFor(req); res.json(snapshot(rt)); });
   app.get('/auth/spotify', auth, (req, res) => {
     const roomId = z.string().uuid().or(z.literal('default')).parse(req.query.room || 'default');
     identity.require(userFor(req),roomId,controllers);
@@ -166,16 +222,19 @@ export function createApp(config: Config, provided?: Store, services: {
     if (req.query.error) { res.redirect('/?room=' + roomId + '&spotify=denied'); return; }
     const {profile,encryptedTokens} = await rt.spotify.exchange(z.string().min(1).max(2048).parse(req.query.code),row.verifier);
     if (profile.product !== 'premium') throw new AppError('Akun Spotify Premium diperlukan.',403);
+    requireActiveRoom(roomId);
     if (roomId !== 'default' && spotify.connected && !identity.spotifyId('default')) {
+      if (retiringRooms.has('default')) throw new AppError('Tunggu sampai penghapusan Ruang utama selesai.',409);
       let legacyProfile;
       try { legacyProfile = await spotify.api('/me'); } catch {
         throw new AppError('Hubungkan ulang Spotify di Ruang utama sebelum menambah akun lain.',409);
       }
       if (typeof legacyProfile?.id !== 'string' || !legacyProfile.id) throw new AppError('Identitas Spotify Ruang utama belum tersedia.',409);
-      if (!identity.spotifyId('default')) identity.bindSpotify('default',legacyProfile.id);
+      if (identity.isActiveRoom('default') && !retiringRooms.has('default') && !identity.spotifyId('default')) identity.bindSpotify('default',legacyProfile.id);
     }
     identity.require(userFor(req),roomId,controllers);
     await rt.queue.run(async () => {
+      requireActiveRoom(roomId);
       identity.require(userFor(req),roomId,controllers);
       if (rt.queue.lease && identity.spotifyId(roomId) !== profile.id) throw new AppError('Lepaskan player ruang sebelum mengganti akun Spotify.',409);
       rt.store.transaction(() => {
@@ -191,9 +250,24 @@ export function createApp(config: Config, provided?: Store, services: {
     broadcast(rt);
     res.redirect('/?room=' + roomId + '&spotify=connected');
   });
-  app.get('/api/spotify/token', auth, async (req, res) => res.json({ accessToken: await roomFor(req,['owner','operator']).spotify.token() }));
-  app.get('/api/search', auth, async (req, res) => res.json({ tracks: await roomFor(req).spotify.search(z.string().trim().min(2).max(200).parse(req.query.q)) }));
-  app.post('/api/requests', auth, async (req, res) => { const rt=roomFor(req), user=userFor(req); const input=z.string().trim().min(1).max(500).parse(req.body.input); const added = await rt.queue.enqueue(await rt.spotify.resolve(input), { requester:user.name, source:'web' }); res.status(201).json({added:added.length}); });
+  app.get('/api/spotify/token', auth, async (req, res) => {
+    const accessToken = await roomFor(req,controllers).spotify.token();
+    roomFor(req,controllers);
+    res.json({accessToken});
+  });
+  app.get('/api/search', auth, async (req, res) => {
+    const tracks = await roomFor(req).spotify.search(z.string().trim().min(2).max(200).parse(req.query.q));
+    roomFor(req);
+    res.json({tracks});
+  });
+  app.post('/api/requests', auth, async (req, res) => {
+    const rt = roomFor(req);
+    const input = z.string().trim().min(1).max(500).parse(req.body.input);
+    const tracks = await rt.spotify.resolve(input);
+    roomFor(req);
+    const added = await rt.queue.enqueue(tracks,{requester:userFor(req).name,source:'web'});
+    res.status(201).json({added:added.length});
+  });
   app.delete('/api/requests/:id', auth, async (req, res) => { await roomFor(req,['owner','operator']).queue.remove(String(req.params.id)); res.json({ ok: true }); });
   app.post('/api/queue/clear', auth, async (req, res) => { const cleared = await roomFor(req,['owner','operator']).queue.clear(); res.json({ cleared }); });
   const ownsConnection = (req: express.Request, room: Runtime, id: string) => {
@@ -269,7 +343,7 @@ export function createApp(config: Config, provided?: Store, services: {
       let reply: string;
       let commandFailed = false;
       try {
-        const result = identity.consumeVerification(body.groupId,body.session,(pairing[1] || '').trim().toLowerCase());
+        const result = identity.consumeVerification(body.groupId,body.session,(pairing[1] || '').trim().toLowerCase(),id=>!retiringRooms.has(id));
         const rt = runtime(result.roomId);
         const roomUrl = config.origin + '/?room=' + result.roomId;
         const spotifyStatus = rt.spotify.connected
@@ -298,6 +372,7 @@ export function createApp(config: Config, provided?: Store, services: {
     rt.integrationSerial = new Promise<void>(resolve => { finishIntegration = resolve; });
     try {
       await previousIntegration;
+      requireActiveRoom(roomId);
       if (identity.roomForGroup(body.groupId,body.session) !== roomId) throw new AppError('Grup berpindah ruang. Kirim ulang command.',403);
       const receipt = identity.beginCommand(receiptId);
       if (receipt) { res.json({reply:receipt,duplicate:true}); return; }
@@ -318,6 +393,7 @@ export function createApp(config: Config, provided?: Store, services: {
   app.use((_req, res) => res.status(404).json({ error: 'Endpoint tidak ditemukan.' }));
   app.use((error: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => { const status = error instanceof AppError ? error.status : error instanceof z.ZodError ? 400 : 500; res.status(status).json({ error: error instanceof z.ZodError ? 'Data input tidak valid.' : status === 500 ? 'Terjadi kesalahan server. Coba lagi.' : (error as Error).message }); if (status === 500) console.error('Server error:', (error as Error).name); });
   const validClient = (token: string, roomId: string) => {
+    if (retiringRooms.has(roomId)) return null;
     const user = identity.session(token);
     return user ? identity.role(user,roomId) : null;
   };
@@ -331,6 +407,7 @@ export function createApp(config: Config, provided?: Store, services: {
     socket.on('close', () => { clients.delete(id); rt.queue.release(id); });
     socket.on('message', data => {
       try {
+        if (retiringRooms.has(rt.id)) return;
         const role = validClient(token,rt.id);
         if (!role) { socket.close(1008,'Akses ruang berakhir'); return; }
         if (!controllers.includes(role) || rt.queue.lease?.connectionId !== id) return;
@@ -359,12 +436,13 @@ export function createApp(config: Config, provided?: Store, services: {
     const rt = runtime(roomId);
     wss.handleUpgrade(req,socket,head,ws => connectRoom(ws,token,rt));
   });
-  if (!provided) for (const room of identity.db.prepare('SELECT id FROM rooms').all()) runtime(String(room.id));
+  if (!provided) for (const id of identity.listActiveRoomIds()) runtime(id);
   const timer = setInterval(() => {
     const watched = new Set<string>();
     for (const [id,client] of clients) {
+      if (retiringRooms.has(client.roomId)) continue;
       const role = validClient(client.token,client.roomId);
-      if (!role) { runtime(client.roomId).queue.release(id); client.socket.close(1008,'Akses ruang berakhir'); }
+      if (!role) { runtimes.get(client.roomId)?.queue.release(id); client.socket.close(1008,'Akses ruang berakhir'); }
       else {
         watched.add(client.roomId);
         if (!controllers.includes(role)) runtime(client.roomId).queue.release(id);
@@ -372,9 +450,13 @@ export function createApp(config: Config, provided?: Store, services: {
       }
     }
     for (const rt of runtimes.values()) {
+      if (retiringRooms.has(rt.id)) continue;
       rt.queue.tick();
       if (watched.has(rt.id) || rt.queue.current()) void rt.observer.refresh();
-      void rt.notifications.dispatch().then(() => broadcast(rt)).catch(() => {});
+      if (!rt.notificationTask) {
+        rt.notificationTask = rt.notifications.dispatch().then(() => broadcast(rt)).catch(() => {})
+          .finally(() => { rt.notificationTask = undefined; });
+      }
     }
   },5000);
   timer.unref();
@@ -386,9 +468,11 @@ export function createApp(config: Config, provided?: Store, services: {
     server.close();
     for (const rt of runtimes.values()) {
       rt.observer.stop();
+      rt.spotify.retire();
       rt.queue.removeAllListeners();
       rt.store.close();
     }
+    if (!runtimes.has('default')) store.close();
     identity.close();
   } };
 }

@@ -36,11 +36,13 @@ export class Identity {
       CREATE TABLE IF NOT EXISTS command_receipts (id TEXT PRIMARY KEY, reply TEXT NOT NULL);
       CREATE INDEX IF NOT EXISTS room_members_user ON room_members(user_id);
       CREATE INDEX IF NOT EXISTS room_groups_room ON room_groups(room_id);`);
+    const roomColumns = this.db.prepare('PRAGMA table_info(rooms)').all() as {name:string}[];
+    if (!roomColumns.some(column => column.name === 'deleted_at')) this.db.exec('ALTER TABLE rooms ADD COLUMN deleted_at INTEGER');
     if (!(this.db.prepare('SELECT 1 FROM users LIMIT 1').get())) {
       const adminId = randomUUID();
       this.transaction(() => {
         this.db.prepare('INSERT INTO users VALUES(?,?,?,?,?,?)').run(adminId, 'owner@local', 'Pemilik', passwordHash(secret()), 1, Date.now());
-        this.db.prepare('INSERT INTO rooms VALUES(?,?,?,?)').run('default', 'Ruang utama', adminId, Date.now());
+        this.db.prepare('INSERT INTO rooms(id,name,owner_id,created_at) VALUES(?,?,?,?)').run('default', 'Ruang utama', adminId, Date.now());
         this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run('default', adminId, 'owner');
         for (const group of defaultGroups.filter(group => group !== '0@g.us')) this.db.prepare('INSERT INTO room_groups VALUES(?,?,?)').run(group, 'default', session);
       });
@@ -72,11 +74,17 @@ export class Identity {
     return this.db.prepare(`SELECT r.id,r.name,u.name ownerName,CASE WHEN ?=1 THEN 'owner' ELSE m.role END role,
       (SELECT group_id FROM room_groups WHERE room_id=r.id ORDER BY group_id LIMIT 1) groupId
       FROM rooms r JOIN users u ON u.id=r.owner_id LEFT JOIN room_members m ON m.room_id=r.id AND m.user_id=?
-      WHERE ?=1 OR m.role IS NOT NULL ORDER BY r.created_at,r.id`).all(+user.admin,user.id,+user.admin) as unknown as Room[];
+      WHERE r.deleted_at IS NULL AND (?=1 OR m.role IS NOT NULL) ORDER BY r.created_at,r.id`).all(+user.admin,user.id,+user.admin) as unknown as Room[];
+  }
+  listActiveRoomIds(): string[] {
+    return this.db.prepare('SELECT id FROM rooms WHERE deleted_at IS NULL ORDER BY created_at,id').all().map(row => String(row.id));
+  }
+  isActiveRoom(roomId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL').get(roomId);
   }
   role(user: User, roomId: string): Role | null {
-    if (user.admin && this.db.prepare('SELECT 1 FROM rooms WHERE id=?').get(roomId)) return 'owner';
-    const row = this.db.prepare('SELECT role FROM room_members WHERE user_id=? AND room_id=?').get(user.id, roomId) as {role:Role}|undefined;
+    if (user.admin && this.db.prepare('SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL').get(roomId)) return 'owner';
+    const row = this.db.prepare('SELECT m.role FROM room_members m JOIN rooms r ON r.id=m.room_id WHERE m.user_id=? AND m.room_id=? AND r.deleted_at IS NULL').get(user.id, roomId) as {role:Role}|undefined;
     return row?.role || null;
   }
   require(user: User, roomId: string, roles: Role[] = ['owner','operator','member']) {
@@ -85,17 +93,17 @@ export class Identity {
     return role;
   }
   roomForGroup(group: string, session: string): string | null {
-    const row = this.db.prepare('SELECT room_id roomId FROM room_groups WHERE group_id=? AND session=?').get(group, session) as {roomId:string}|undefined;
+    const row = this.db.prepare('SELECT g.room_id roomId FROM room_groups g JOIN rooms r ON r.id=g.room_id WHERE g.group_id=? AND g.session=? AND r.deleted_at IS NULL').get(group, session) as {roomId:string}|undefined;
     return row?.roomId || null;
   }
   groupsForRoom(roomId: string, session: string) {
-    return this.db.prepare('SELECT group_id FROM room_groups WHERE room_id=? AND session=?')
+    return this.db.prepare('SELECT g.group_id FROM room_groups g JOIN rooms r ON r.id=g.room_id WHERE g.room_id=? AND g.session=? AND r.deleted_at IS NULL')
       .all(roomId,session).map(row => String(row.group_id));
   }
   createRoom(owner: User, name: string) {
     const id = randomUUID();
     this.transaction(() => {
-      this.db.prepare('INSERT INTO rooms VALUES(?,?,?,?)').run(id,name,owner.id,Date.now());
+      this.db.prepare('INSERT INTO rooms(id,name,owner_id,created_at) VALUES(?,?,?,?)').run(id,name,owner.id,Date.now());
       this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(id,owner.id,'owner');
       this.issueVerification(id);
     });
@@ -122,11 +130,12 @@ export class Identity {
     if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) throw new AppError('Ruang ini sudah terhubung ke grup.',409);
     return this.issueVerification(roomId);
   }
-  consumeVerification(groupId: string, session: string, code: string) {
+  consumeVerification(groupId: string, session: string, code: string, allowRoom?: (roomId: string) => boolean) {
     return this.transaction(() => {
       const pairing = this.db.prepare(`SELECT v.room_id roomId,r.name roomName FROM room_verifications v
-        JOIN rooms r ON r.id=v.room_id WHERE v.code_hash=? AND v.expires>?`).get(hash(code),Date.now()) as {roomId:string;roomName:string}|undefined;
+        JOIN rooms r ON r.id=v.room_id WHERE v.code_hash=? AND v.expires>? AND r.deleted_at IS NULL`).get(hash(code),Date.now()) as {roomId:string;roomName:string}|undefined;
       if (!pairing) throw new AppError('Kode verifikasi tidak valid atau kedaluwarsa.',409);
+      if (allowRoom && !allowRoom(pairing.roomId)) throw new AppError('Ruang sedang dinonaktifkan.',409);
       if (this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(pairing.roomId)) throw new AppError('Ruang ini sudah terhubung ke grup.',409);
       if (this.db.prepare('SELECT 1 FROM room_groups WHERE group_id=?').get(groupId)) throw new AppError('Grup sudah terhubung ke ruang lain.',409);
       this.db.prepare('INSERT INTO room_groups VALUES(?,?,?)').run(groupId,pairing.roomId,session);
@@ -146,7 +155,7 @@ export class Identity {
   }
   accept(token: string, password: string) {
     return this.transaction(() => {
-      const invite = this.db.prepare('SELECT * FROM invitations WHERE hash=? AND expires>?')
+      const invite = this.db.prepare('SELECT i.* FROM invitations i JOIN rooms r ON r.id=i.room_id WHERE i.hash=? AND i.expires>? AND r.deleted_at IS NULL')
         .get(hash(token),Date.now()) as {room_id:string; email:string; name:string; role:Exclude<Role,'owner'>}|undefined;
       if (!invite) throw new AppError('Undangan tidak valid atau kedaluwarsa.',410);
       if (this.db.prepare('SELECT 1 FROM users WHERE email=?').get(invite.email)) {
@@ -182,6 +191,21 @@ export class Identity {
       if (!this.db.prepare('SELECT 1 FROM room_groups WHERE room_id=?').get(roomId)) this.issueVerification(roomId);
     });
   }
+  deleteRoom(actor: User, roomId: string): void {
+    this.require(actor,roomId,['owner']);
+    this.transaction(() => {
+      const result = this.db.prepare('UPDATE rooms SET deleted_at=? WHERE id=? AND deleted_at IS NULL').run(Date.now(),roomId);
+      if (!result.changes) throw new AppError('Ruang tidak ditemukan atau sudah dihapus.',404);
+      this.db.prepare('DELETE FROM invitations WHERE room_id=?').run(roomId);
+      this.db.prepare('DELETE FROM room_verifications WHERE room_id=?').run(roomId);
+      if (this.db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='group_pairings'").get()) {
+        this.db.prepare('DELETE FROM group_pairings WHERE room_id=?').run(roomId);
+      }
+      this.db.prepare('DELETE FROM room_groups WHERE room_id=?').run(roomId);
+      this.db.prepare('DELETE FROM spotify_accounts WHERE room_id=?').run(roomId);
+      this.db.prepare('DELETE FROM room_members WHERE room_id=?').run(roomId);
+    });
+  }
   beginCommand(id: string) {
     const inserted = this.db.prepare('INSERT OR IGNORE INTO command_receipts VALUES(?,?)')
       .run(id,'Command sudah diterima. Periksa /queue sebelum mencoba lagi.');
@@ -193,6 +217,7 @@ export class Identity {
   }
   bindSpotify(roomId: string, spotifyId: string) {
     this.transaction(() => {
+      if (!this.db.prepare('SELECT 1 FROM rooms WHERE id=? AND deleted_at IS NULL').get(roomId)) throw new AppError('Ruang tidak tersedia.',404);
       const current = this.db.prepare('SELECT room_id FROM spotify_accounts WHERE spotify_id=?').get(spotifyId) as {room_id:string}|undefined;
       if (current && current.room_id !== roomId) throw new AppError('Akun Spotify sudah terhubung ke ruang lain.',409);
       this.db.prepare('DELETE FROM spotify_accounts WHERE room_id=?').run(roomId);
