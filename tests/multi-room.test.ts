@@ -85,6 +85,20 @@ test('admin sistem mengelola akun dan akses; password/status memutus sesi; anggo
   }finally{identity.close();}
 });
 
+test('admin membuat akun pemilik baru beserta ruang yang ia kuasai',()=>{
+  const identity=new Identity(':memory:','admin-password-long-enough',[],'carubra');
+  try{
+    const admin=identity.login('owner@local','admin-password-long-enough');
+    const id=identity.createUser(admin.user,'cafe@example.test','Pemilik Cafe','owner-password-long',null,'owner','Cafe Baru');
+    const owner=identity.login('cafe@example.test','owner-password-long');
+    assert.equal(owner.user.id,id);
+    const rooms=identity.rooms(owner.user);
+    assert.equal(rooms.length,1);assert.equal(rooms[0].name,'Cafe Baru');assert.equal(rooms[0].role,'owner');
+    assert.equal(identity.verificationCode(owner.user,rooms[0].id)?.code.length,18);
+    assert.equal(identity.rooms(admin.user).some(room=>room.id===rooms[0].id),true);
+  }finally{identity.close();}
+});
+
 test('OAuth Spotify menolak akun sama lintas ruang tanpa mengganti token lama', async () => {
   const folder = mkdtempSync(join(tmpdir(), 'ruang-oauth-'));
   const config = loadConfig({ ADMIN_PASSWORD: 'admin-password-long-enough', ENCRYPTION_KEY: 'a'.repeat(64), APP_ORIGIN: 'http://127.0.0.1:3210', DATA_DIR: folder, SPOTIFY_CLIENT_ID: 'test-client-id' });

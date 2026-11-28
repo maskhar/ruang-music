@@ -114,8 +114,12 @@ export function createApp(config: Config, provided?: Store, services: {
   app.get('/api/rooms', auth, (req, res) => res.json({ rooms: roomCards(userFor(req)) }));
   app.get('/api/admin/users', auth, (req,res) => res.json({users:identity.users(userFor(req))}));
   app.post('/api/admin/users', auth, (req,res) => {
-    const body=z.object({email:z.email().max(254).transform(value=>value.toLowerCase()),name:z.string().trim().min(1).max(60),password:z.string().min(12).max(256),roomId:z.string().min(1),role:z.enum(['operator','member'])}).parse(req.body);
-    res.status(201).json({id:identity.createUser(userFor(req),body.email,body.name,body.password,body.roomId,body.role)});
+    const body=z.discriminatedUnion('role',[
+      z.object({email:z.email().max(254).transform(value=>value.toLowerCase()),name:z.string().trim().min(1).max(60),password:z.string().min(12).max(256),roomId:z.string().min(1),role:z.enum(['operator','member'])}),
+      z.object({email:z.email().max(254).transform(value=>value.toLowerCase()),name:z.string().trim().min(1).max(60),password:z.string().min(12).max(256),roomName:z.string().trim().min(2).max(80),role:z.literal('owner')})
+    ]).parse(req.body);
+    const id=body.role==='owner'?identity.createUser(userFor(req),body.email,body.name,body.password,null,'owner',body.roomName):identity.createUser(userFor(req),body.email,body.name,body.password,body.roomId,body.role);
+    res.status(201).json({id});
   });
   app.patch('/api/admin/users/:id',auth,(req,res)=>{
     const body=z.object({email:z.email().max(254).transform(value=>value.toLowerCase()).optional(),name:z.string().trim().min(1).max(60).optional(),password:z.string().min(12).max(256).optional(),disabled:z.boolean().optional()}).strict().parse(req.body);

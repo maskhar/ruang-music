@@ -80,14 +80,21 @@ export class Identity {
     const memberships = this.db.prepare(`SELECT m.user_id userId,m.room_id roomId,r.name roomName,m.role FROM room_members m JOIN rooms r ON r.id=m.room_id WHERE r.deleted_at IS NULL ORDER BY r.name`).all() as {userId:string;roomId:string;roomName:string;role:Role}[];
     return rows.map(row => ({id:row.id,email:row.email,name:row.name,admin:!!row.admin,disabled:!!row.disabled_at,rooms:memberships.filter(member=>member.userId===row.id).map(({roomId,roomName,role})=>({roomId,roomName,role}))}));
   }
-  createUser(actor: User, email: string, name: string, password: string, roomId: string, role: Exclude<Role,'owner'>) {
+  createUser(actor: User, email: string, name: string, password: string, roomId: string, role: Exclude<Role,'owner'>): string;
+  createUser(actor: User, email: string, name: string, password: string, roomId: null, role: 'owner', roomName: string): string;
+  createUser(actor: User, email: string, name: string, password: string, roomId: string|null, role: Role, roomName?: string) {
     this.requireAdmin(actor);
     return this.transaction(() => {
-      if (!this.isActiveRoom(roomId)) throw new AppError('Ruang tidak ditemukan.',404);
+      if (role==='owner' ? roomId!==null || !roomName || roomName.trim().length<2 || roomName.length>80 : !roomId || !this.isActiveRoom(roomId)) throw new AppError('Ruang tidak valid.',400);
       if (this.db.prepare('SELECT 1 FROM users WHERE email=?').get(email)) throw new AppError('Email sudah terdaftar.',409);
       const id=randomUUID();
       this.db.prepare('INSERT INTO users(id,email,name,password_hash,admin,created_at) VALUES(?,?,?,?,0,?)').run(id,email,name,passwordHash(password),Date.now());
-      this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(roomId,id,role);
+      const targetRoom=role==='owner'?randomUUID():roomId!;
+      if (role==='owner') {
+        this.db.prepare('INSERT INTO rooms(id,name,owner_id,created_at) VALUES(?,?,?,?)').run(targetRoom,roomName!.trim(),id,Date.now());
+        this.issueVerification(targetRoom);
+      }
+      this.db.prepare('INSERT INTO room_members VALUES(?,?,?)').run(targetRoom,id,role);
       return id;
     });
   }
