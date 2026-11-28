@@ -15,13 +15,17 @@ Browser hanya menampilkan dan memainkan request. Database server menjadi sumber 
 
 ## WhatsApp
 
-Session `carubra`, credential `WAHA account`. Hubungkan grup ke ruang dengan `/hubungkan KODE`. Simpan grup di pengaturan ruang melalui pairing. Anggota grup tertaut dapat meminta lagu tanpa akun web. Balasan dan notifikasi dikirim ke grup asal. Bot mengabaikan DM, pesan dari nomor bot, media, dan command dari grup yang belum tertaut, kecuali `/hubungkan`.
+Session `carubra`, credential `WAHA account`. Dua grup berbagi satu player/antrean:
+
+- `120363430180897172@g.us`
+- `120363412435389448@g.us`
+
+DM, grup lain, pesan fromMe, media, dan pesan tanpa participant valid diabaikan. Anggota tidak perlu akun web. Balasan/notifikasi kembali ke grup asal, bukan disebar ke seluruh grup.
 
 Workflow utama `mMKGZXtIS2uvso8W` kini menjadi adapter WAHA ke `POST /api/integrations/whatsapp`. Webhook asli dipertahankan. Workflow monitor lama `WJhwejxEcPWJpG6o` dinonaktifkan; notifikasi memakai outbox aplikasi. Tidak ada lagi node Spotify/AI yang memutar langsung pada workflow utama.
 
 | Command | Perilaku |
 |---|---|
-| `/hubungkan KODE` | Pasangkan grup ke ruang menggunakan kode dari dashboard |
 | `/play judul artis` | Cari hasil track pertama, simpan request, tampilkan judul/artis/tautan |
 | `/play URL_TRACK` | Gunakan ID track persis |
 | `/play URL_ALBUM` | Masukkan track album sesuai urutan |
@@ -45,7 +49,7 @@ Playlist personal/playlist buatan Spotify bisa menghasilkan metadata 404 atau da
 
 ## Player dan akun
 
-Setiap ruang memakai akun Spotify dan browser player sendiri. Operator dapat mengelola antrean dari browser lain. Server menyimpan token refresh terenkripsi per ruang. Hubungkan ulang bila Client ID berubah, ingin mengganti akun, atau token/izin kedaluwarsa.
+Satu akun Spotify untuk instalasi ini, satu browser sebagai sumber audio. Browser lain bisa login operator dan mengelola antrean. Login Spotify cukup sekali pada server, dengan token refresh terenkripsi. Hubungkan ulang bila Client ID berubah, ingin mengganti akun, atau token/izin tidak valid.
 
 Spotify Premium serta izin aplikasi Spotify diperlukan. Client ID bukan jenis paket Premium; akun Spotify yang login menentukan hak playback. Callback terdaftar:
 
@@ -62,7 +66,7 @@ Antrean native Spotify, playlist continuation, dan autoplay di luar aplikasi tid
 `POST /api/integrations/whatsapp`, Header Auth `Authorization: Bearer <INTEGRATION_TOKEN>`:
 
 ```json
-{"session":"carubra","groupId":"123456789@g.us","senderId":"628123456789@c.us","messageId":"ID-ASLI-WAHA","requester":"Nama anggota","text":"/play judul artis"}
+{"groupId":"120363430180897172@g.us","senderId":"628123456789@c.us","messageId":"ID-ASLI-WAHA","requester":"Nama anggota","text":"/play judul artis"}
 ```
 
 Server memeriksa token/grup/participant dan menyimpan receipt per grup+ID pesan sebelum command dijalankan. Duplicate tidak dijalankan atau dibalas ulang oleh adapter. Timeout mutation tidak dicoba ulang otomatis. Error command dikembalikan sebagai `reply` untuk dikirim ke pengguna. N8n harus tersambung ke `carubra-network`.
@@ -71,29 +75,31 @@ Notifikasi hanya setelah playback terkonfirmasi, satu outbox per request. Pengir
 
 ## Operasional
 
-Source produksi: `I:\website-devops\spotify-player`, branch `main`. Node.js 24, React/Vite, Express/WebSocket, SQLite.
+Source development: `I:\website-devops\spotify-player-dev`. Node.js 24, React/Vite, Express/WebSocket, SQLite.
 
 ```powershell
-cd I:\website-devops\spotify-player
+cd I:\website-devops\spotify-player-dev
 npm ci
 npm run check
 npx playwright install chromium
 npm run test:browser
 .\scripts\backup.ps1
-docker compose up -d --build --wait player
+docker compose up -d --build
 docker compose ps
-Invoke-RestMethod https://spotify.carubra.com/healthz
+Invoke-RestMethod http://127.0.0.1:3211/healthz
 ```
 
-Health menampilkan `queueMode: application` dan `rooms: true`. Password admin, Client ID, kunci enkripsi, WAHA key, dan integration token berada pada `.env` (diabaikan Git). Hapus `WHATSAPP_GROUP_ID` dan `WHATSAPP_GROUP_IDS` saat beralih ke pairing. Saat development memakai session WAHA yang sama, masukkan grup uji development ke `WHATSAPP_BLOCKED_GROUP_IDS` produksi dan set `REQUIRE_WHATSAPP_GROUP_BLOCKLIST=true`.
+Health memiliki `queueMode: application`. Password operator, Client ID, kunci enkripsi, WAHA key, dan integration token berada pada `.env` (diabaikan Git). `WHATSAPP_GROUP_IDS` menerima ID grup dipisahkan koma. Jangan bagikan `.env` atau token akses.
 
-Volume `spotify-player_player-data` menyimpan data produksi. Perintah `scripts/backup.ps1` mengambil snapshot SQLite ke folder host `backups`. Simpan juga `.env` secara aman karena kunci enkripsi diperlukan saat pemulihan. Simpan semua file dalam satu set backup untuk pemulihan multi-ruang.
+Volume `dev-spotify-player_dev-player-data` menyimpan data development. Perintah `scripts/backup.ps1` mengambil snapshot SQLite development ke folder host `backups`. Simpan juga `.env` secara aman karena kunci enkripsi diperlukan saat pemulihan. Simpan semua file dalam satu set backup untuk pemulihan multi-ruang.
 
 Polling Spotify hanya membaca `/me/player`, maksimal sekali per 15 detik untuk metadata/volume, dan mengikuti Retry-After saat 429. Antrean berasal dari SQLite dan broadcast WebSocket, sehingga tidak perlu membaca endpoint queue Spotify. SDK browser melaporkan progress setiap 3 detik.
 
 ## Cutover dan rollback
 
-Cadangkan volume SQLite dan `.env` sebelum deploy. `scripts/n8n/update-production-routing.cjs` menyiapkan routing produksi berdasarkan pairing, membatasi workflow development ke grup uji, dan mencadangkan workflow sebelum menerbitkan perubahan. Script mempertahankan webhook dan credential. Jika perlu rollback, gunakan workflow, konfigurasi, dan versi aplikasi sebelum migrasi sebagai satu set dan pertahankan data request yang telah tersimpan.
+Backup workflow sebelum perubahan tersedia di `backups/app-queue-cutover-20261127`, database via script backup. Script `scripts/n8n/app-queue-cutover.cjs` menggunakan helper API n8n pada container, menyiapkan Header Auth terenkripsi, mempertahankan webhook utama, lalu menonaktifkan monitor lama. Script `scripts/n8n/test-app-queue-adapter.cjs` menguji adapter secara terisolasi, tanpa pesan nyata.
+
+Rollback integrasi: pulihkan JSON workflow utama dari backup melalui API/import, aktifkan workflow utama dan monitor lama, lalu gunakan image sebelum app-queue. Jangan jalankan monitor lama dan outbox baru untuk request yang sama. Request yang sudah tersimpan di SQLite tetap dipertahankan. Riwayat/pending lama n8n tetap tersimpan dalam tabel lama dan tidak diimpor otomatis karena tidak dapat dipastikan masih valid.
 
 Remote Git: `https://github.com/maskhar/ruang-music.git`.
 
@@ -125,23 +131,23 @@ Container development terhubung ke `carubra-network` untuk ingress tunnel; volum
 
 Compose membaca `SPOTIFY_CLIENT_ID`, `WAHA_URL`, `WAHA_API_KEY`, dan `WAHA_SESSION` dari `.env` worktree development. `WHATSAPP_GROUP_IDS` hanya dipakai untuk binding Ruang utama saat database identitas pertama kali dibuat. Development mewajibkan `WHATSAPP_BLOCKED_GROUP_IDS` berisi ID grup produksi yang dilayani oleh session WAHA bersama. Setelah mengubah `.env`, jalankan `docker compose up -d --force-recreate` dari worktree development.
 
-Workflow n8n development `xanTFAOSvArYVB9E` hanya menerima ID grup uji yang ditentukan saat routing produksi disiapkan. Saat mengganti grup uji, perbarui filter workflow development dan `WHATSAPP_BLOCKED_GROUP_IDS` produksi bersama agar kedua lingkungan terpisah. Webhook tetap dipakai. Credential API development terpisah dari produksi.
+Workflow n8n development: `xanTFAOSvArYVB9E` (Ruang Musik · DEVELOPMENT), aktif. Session WAHA `carubra` digunakan bersama dengan filter grup pengujian terpisah; webhook lama dipertahankan. Credential API development terpisah dari produksi. Registrasi webhook memulai ulang session WAHA; lakukan perubahan berikutnya pada waktu yang sesuai. Script provisioning `scripts/n8n/setup-development.cjs` hanya untuk pembuatan pertama, bukan dijalankan ulang pada workflow yang sudah tersedia.
 
-## Multi-ruang
+### Multi-ruang
 
-Login admin awal memakai `owner@local` dan `ADMIN_PASSWORD` pada `.env` lingkungan yang dibuka. Dashboard awal menampilkan kartu ruang, status pemutar, jumlah request, serta koneksi Spotify dan WhatsApp. Admin melihat semua ruang, pengguna lainnya melihat ruang sesuai akses. Pilih **Buka ruang** untuk masuk ke player dan antrean ruang. Pemilik ruang dapat mengundang anggota atau operator dari Pengaturan. Tautan undangan berlaku 24 jam dan sekali pakai. Akun yang sudah terdaftar langsung ditambahkan ke ruang dengan peran yang dipilih.
+Login admin awal memakai `owner@local` dan `ADMIN_PASSWORD` pada `.env` development. Dashboard awal menampilkan kartu ruang, status pemutar, jumlah request, serta koneksi Spotify dan WhatsApp. Admin melihat semua ruang, pengguna lainnya melihat ruang sesuai akses. Pilih **Buka ruang** untuk masuk ke player dan antrean ruang. Pemilik ruang dapat mengundang anggota atau operator dari Pengaturan. Tautan undangan berlaku 24 jam dan sekali pakai. Akun yang sudah terdaftar langsung ditambahkan ke ruang dengan peran yang dipilih.
 
 Anggota dapat mencari dan meminta lagu. Operator dapat mengatur player dan antrean. Pemilik dan operator dapat memasangkan grup WhatsApp dan menghubungkan Spotify. Pemilik juga dapat melepas grup serta mengelola keanggotaan.
 
-Hubungkan akun Spotify Premium berbeda untuk setiap ruang yang akan memutar bersamaan. Browser yang aktif mengeluarkan audio untuk ruang yang dipilih.
+Hubungkan akun Spotify Premium berbeda untuk setiap ruang yang akan memutar bersamaan. Callback tetap `https://dev-spotify.carubra.com/auth/spotify/callback`. Browser yang aktif mengeluarkan audio untuk ruang yang dipilih.
 
-Untuk memasangkan grup:
+Untuk memasangkan grup pengujian:
 
 1. Buat ruang dan buka **Pengaturan**. Tempel tautan grup `https://chat.whatsapp.com/…`, lalu pilih **Gabungkan Carubra**. Jika WhatsApp meminta persetujuan, admin grup perlu menyetujui permintaan masuk. Menambahkan nomor Carubra secara manual juga tetap tersedia.
 2. Setelah Carubra masuk, salin perintah `/hubungkan KODE` lalu kirim dari grup tersebut. Kode berlaku 10 menit dan sekali pakai. Setelah kedaluwarsa, buat kode baru dari Pengaturan.
 3. Bot memeriksa pesan melalui WAHA, lalu mengonfirmasi nama ruang dan status Spotify di grup. Jika Spotify belum terhubung, hubungkan akun Premium dari Pengaturan. Bot mengirim kabar saat Spotify berhasil terhubung. Aktifkan browser player pada perangkat yang mengeluarkan suara.
 
-Satu grup hanya dapat dipasangkan ke satu ruang. Pemilik perlu melepas grup dari ruang asal sebelum memasangkannya ke ruang baru. Antrean dan riwayat tetap tersimpan di ruang asal. Workflow n8n produksi meneruskan command semua ruang, termasuk pairing, ke aplikasi.
+Satu grup hanya dapat dipasangkan ke satu ruang. Pemilik perlu melepas grup dari ruang asal sebelum memasangkannya ke ruang baru. Antrean dan riwayat tetap tersimpan di ruang asal. Workflow n8n development yang sama meneruskan command semua ruang, termasuk pairing, ke aplikasi.
 
 Pemilik atau admin dapat membuka **Pengaturan → Akses kontrol WhatsApp**, memilih grup, lalu klik **Muat anggota grup**. Centang anggota yang boleh mengontrol musik dan simpan. Daftar izin berlaku per grup untuk `/next` (`/skip`), `/stop`, `/pause`, dan `/volume` (`/vol`). Jika daftar kosong, command tersebut tidak bisa dijalankan lewat WhatsApp. Server memeriksa kembali keanggotaan grup untuk kontrol. Command request lagu dan peran dashboard mengikuti aturan sebelumnya.
 

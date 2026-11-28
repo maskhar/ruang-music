@@ -4,7 +4,7 @@
     {
       "id": "1121f18e-58d2-4f9b-aeec-4f0af8030b34",
       "name": "WAHA Trigger",
-      "webhookId": "SET_IN_N8N",
+      "webhookId": "d032efbf-b702-4680-b1f5-b1e7a95e0554",
       "type": "n8n-nodes-waha.wahaTrigger",
       "typeVersion": 202411,
       "position": [
@@ -23,7 +23,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const event=$json.body??$json,p=event.payload??{};const group=String(p.from??''),sender=String(p.participant??''),command=String(p.body??'').trim();\nif(event.session!=='carubra'||event.event!=='message'||p.fromMe===true||p.hasMedia===true||!/^\\d+@g\\.us$/.test(group)||!/^\\d+@(?:c\\.us|s\\.whatsapp\\.net|lid)$/.test(sender)||!command.startsWith('/')||!p.id)return [];\nreturn [{json:{session:event.session,groupId:group,senderId:sender,messageId:p.id,text:command,requester:String(p._data?.notifyName??p.pushName??'Anggota WhatsApp').slice(0,60)}}];"
+        "jsCode": "const event=$json.body??$json,p=event.payload??{};\nif(event.session!=='carubra'||event.event!=='message'||p.fromMe===true||p.hasMedia===true||![\"120363430180897172@g.us\",\"120363412435389448@g.us\"].includes(p.from)||!/^\\d+@(?:c\\.us|s\\.whatsapp\\.net|lid)$/.test(p.participant??'')||!/^\\//.test(String(p.body??'').trim())||!p.id)return [];\nreturn [{json:{groupId:p.from,senderId:p.participant,messageId:p.id,text:String(p.body).trim(),requester:String(p._data?.notifyName??p.pushName??'Anggota WhatsApp').slice(0,60)}}];"
       }
     },
     {
@@ -72,7 +72,7 @@
         0
       ],
       "parameters": {
-        "jsCode": "const c=$('Validasi grup dan peminta').first().json,r=$json,b=r.body??r,status=Number(r.statusCode??0);\nif(status<200||status>=300||b.duplicate===true||typeof b.reply!=='string'||!b.reply)return [];\nreturn [{json:{chatId:c.groupId,messageId:c.messageId,reply:b.reply}}];"
+        "jsCode": "const c=$('Validasi grup dan peminta').first().json,r=$json,b=r.body??r;\nif(b.duplicate===true)return [];\nconst reply=typeof b.reply==='string'?b.reply:typeof b.error==='string'?b.error:r.statusCode===429?'Terlalu banyak command. Tunggu sebentar lalu periksa /queue.':'Server antrean belum dapat mengonfirmasi command. Periksa /queue sebelum mengirim request lagi.';\nreturn [{json:{chatId:c.groupId,messageId:c.messageId,reply}}];"
       }
     },
     {
@@ -105,7 +105,7 @@
       },
       "credentials": {
         "wahaApi": {
-          "id": "SET_IN_N8N",
+          "id": "TmoxOMfuUUCgESYA",
           "name": "WAHA account"
         }
       },

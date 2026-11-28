@@ -1,18 +1,23 @@
-name: spotify-player
+name: dev-spotify-player
 services:
   player:
     build: .
-    container_name: spotify-player
+    image: dev-spotify-player:latest
+    container_name: dev-spotify-player
     restart: unless-stopped
     env_file: .env
     environment:
       NODE_ENV: production
+      PORT: 3210
+      APP_ORIGIN: https://dev-spotify.carubra.com
       DATA_DIR: /app/data
+      REQUIRE_WHATSAPP_GROUP_BLOCKLIST: "true"
     ports:
-      - "127.0.0.1:3210:3210"
+      - "127.0.0.1:3211:3210"
     volumes:
-      - player-data:/app/data
+      - dev-player-data:/app/data
     networks:
+      - default
       - carubra-network
     security_opt:
       - no-new-privileges:true
@@ -24,7 +29,8 @@ services:
         max-size: "10m"
         max-file: "3"
 volumes:
-  player-data:
+  dev-player-data:
+
 networks:
   carubra-network:
     external: true
